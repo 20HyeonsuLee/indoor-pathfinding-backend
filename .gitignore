@@ -26,6 +26,12 @@ out/
 !**/src/main/**/out/
 !**/src/test/**/out/
 
+### Claude Code ###
+claude/
+.claude/
+.claudecode.md
+.mcp.json
+
 ### NetBeans ###
 /nbproject/private/
 /nbbuild/
@@ -35,3 +41,6 @@ out/
 
 ### VS Code ###
 .vscode/
+
+### Secret ###
+application.yml
