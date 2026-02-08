@@ -67,6 +67,11 @@ rtab/path_service/output/
 orb-slam3/data/input/rgbd_dataset_freiburg1_xyz/
 orb-slam3/data/input/rgbd_dataset_freiburg1_xyz.tgz
 orb-slam3/data/input/my_euroc/
+orb-slam3/data/input/test.mp4
+orb-slam3/data/input/test.zip
+rtab/db/*.db
+*.mp4
+*.fbx
 
 ### Plans ###
 plans/
