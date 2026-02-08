@@ -1,12 +1,12 @@
 # Stage 1: Build
-FROM gradle:8.12-jdk25 AS build
+FROM eclipse-temurin:25-jdk AS build
 
 WORKDIR /app
-COPY build.gradle.kts settings.gradle.kts ./
+COPY build.gradle.kts settings.gradle.kts gradlew ./
 COPY gradle ./gradle
 COPY src ./src
 
-RUN gradle bootJar -x test --no-daemon
+RUN chmod +x gradlew && ./gradlew bootJar -x test --no-daemon
 
 # Stage 2: Runtime
 FROM eclipse-temurin:25-jre
