@@ -32,7 +32,7 @@ server:
 
 # Path Processing Service Configuration
 path-service:
-  base-url: http://indoor-path-service:8001
+  base-url: http://indoor-path-service:8000
 
 # Storage Configuration
 storage:

@@ -27,7 +27,7 @@ services:
       dockerfile: Dockerfile
     container_name: indoor-path-service
     ports:
-      - "8001:8001"
+      - "8000:8000"
     volumes:
       - ./storage/uploads:/app/uploads
       - ./storage/output:/app/output

@@ -21,7 +21,7 @@ spring:
 
 # Path Processing Service Configuration (mocked in tests)
 path-service:
-  base-url: http://localhost:8001
+  base-url: http://localhost:8000
 
 # Storage Configuration
 storage:

@@ -28,6 +28,12 @@ public class SwaggerConfig {
                     - POI(관심지점) 관리
                     - 실내 길찾기 (A* 알고리즘)
                     - 수직 통로(계단/엘리베이터) 관리
+
+                    ## API 문서 접근
+                    | 서비스 | Swagger UI | OpenAPI JSON | ReDoc |
+                    |--------|-----------|-------------|-------|
+                    | Spring Boot (메인) | [/swagger-ui.html](/swagger-ui.html) | [/v3/api-docs](/v3/api-docs) | - |
+                    | FastAPI (경로처리) | [localhost:8000/docs](http://localhost:8000/docs) | [localhost:8000/openapi.json](http://localhost:8000/openapi.json) | [localhost:8000/redoc](http://localhost:8000/redoc) |
                     """)
                 .version("1.0.0")
                 .contact(new Contact()

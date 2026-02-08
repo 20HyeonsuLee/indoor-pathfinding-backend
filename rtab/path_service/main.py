@@ -40,6 +40,7 @@
 """
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 from typing import List, Optional, Dict
@@ -107,6 +108,15 @@ app = FastAPI(
     openapi_tags=tags_metadata,
     docs_url="/docs",
     redoc_url="/redoc",
+)
+
+# CORS 설정
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
@@ -806,8 +816,8 @@ if __name__ == "__main__":
     print(f"  Upload Directory: {UPLOAD_DIR}")
     print(f"  Output Directory: {OUTPUT_DIR}")
     print("-" * 60)
-    print("  Swagger UI: http://localhost:8001/docs")
-    print("  ReDoc:      http://localhost:8001/redoc")
+    print("  Swagger UI: http://localhost:8000/docs")
+    print("  ReDoc:      http://localhost:8000/redoc")
     print("=" * 60)
 
-    uvicorn.run(app, host="0.0.0.0", port=8001)
+    uvicorn.run(app, host="0.0.0.0", port=8000)

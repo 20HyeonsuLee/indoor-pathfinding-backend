@@ -23,7 +23,7 @@ public class PathProcessingClient {
 
     private final WebClient webClient;
 
-    public PathProcessingClient(@Value("${path-service.base-url:http://localhost:8001}") String baseUrl) {
+    public PathProcessingClient(@Value("${path-service.base-url:http://localhost:8000}") String baseUrl) {
         this.webClient = WebClient.builder()
             .baseUrl(baseUrl)
             .build();
