@@ -40,6 +40,26 @@ services:
     networks:
       - indoor-network
 
+  # Spring Boot Main Application
+  spring-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: indoor-spring-app
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./storage/maps:/app/storage/maps
+      - ./storage/uploads:/app/storage/uploads
+      - ./storage/output:/app/storage/output
+    depends_on:
+      postgres:
+        condition: service_healthy
+      path-service:
+        condition: service_started
+    networks:
+      - indoor-network
+
 volumes:
   postgres_data:
 

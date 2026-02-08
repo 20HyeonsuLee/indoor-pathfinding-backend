@@ -4,7 +4,7 @@ spring:
 
   # PostgreSQL + PostGIS Configuration
   datasource:
-    url: jdbc:postgresql://localhost:5432/indoor_pathfinding
+    url: jdbc:postgresql://indoor-pathfinding-db:5432/indoor_pathfinding
     driver-class-name: org.postgresql.Driver
     username: indoor
     password: indoor1234
@@ -32,7 +32,7 @@ server:
 
 # Path Processing Service Configuration
 path-service:
-  base-url: http://localhost:8001
+  base-url: http://indoor-path-service:8001
 
 # Storage Configuration
 storage:

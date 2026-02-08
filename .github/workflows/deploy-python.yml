@@ -1,0 +1,60 @@
+name: Deploy FastAPI
+
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    name: Build & Deploy FastAPI
+    runs-on: self-hosted
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Create storage directories
+        run: |
+          New-Item -ItemType Directory -Force -Path storage/uploads
+          New-Item -ItemType Directory -Force -Path storage/output
+        shell: pwsh
+
+      - name: Build FastAPI image
+        run: docker compose build path-service
+
+      - name: Deploy FastAPI
+        run: docker compose up -d path-service
+
+      - name: Wait for startup
+        run: Start-Sleep -Seconds 10
+        shell: pwsh
+
+      - name: Health check
+        run: |
+          $maxRetries = 5
+          $retryCount = 0
+          $success = $false
+
+          while ($retryCount -lt $maxRetries -and -not $success) {
+            try {
+              $response = Invoke-WebRequest -Uri "http://localhost:8001/health" -UseBasicParsing -TimeoutSec 10
+              if ($response.StatusCode -eq 200) {
+                Write-Host "FastAPI is running successfully!"
+                $success = $true
+              }
+            } catch {
+              $retryCount++
+              Write-Host "Attempt $retryCount/$maxRetries - Waiting for FastAPI to start..."
+              Start-Sleep -Seconds 5
+            }
+          }
+
+          if (-not $success) {
+            Write-Host "FastAPI health check failed. Checking logs..."
+            docker compose logs --tail=50 path-service
+            exit 1
+          }
+        shell: pwsh
+
+      - name: Show running containers
+        if: always()
+        run: docker compose ps
