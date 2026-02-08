@@ -25,13 +25,49 @@ repositories {
 }
 
 dependencies {
+	// Spring Boot Starters
 	implementation("org.springframework.boot:spring-boot-starter-data-jpa")
 	implementation("org.springframework.boot:spring-boot-starter-webmvc")
+	implementation("org.springframework.boot:spring-boot-starter-validation")
+
+	// Database
+	runtimeOnly("com.h2database:h2")
+	runtimeOnly("org.postgresql:postgresql")
+
+	// Spatial Data (PostGIS support)
+	implementation("org.hibernate.orm:hibernate-spatial:7.0.3.Final")
+	implementation("org.locationtech.jts:jts-core:1.20.0")
+	implementation("org.geolatte:geolatte-geom:1.9.1")
+
+	// JSON Processing
+	implementation("com.fasterxml.jackson.datatype:jackson-datatype-jsr310")
+
+	// File Upload
+	implementation("commons-io:commons-io:2.15.1")
+
+	// HTTP Client for Python service communication
+	implementation("org.springframework.boot:spring-boot-starter-webflux")
+
+	// Swagger / OpenAPI
+	implementation("org.springdoc:springdoc-openapi-starter-webmvc-ui:3.0.1")
+
+	// Lombok
 	compileOnly("org.projectlombok:lombok")
 	annotationProcessor("org.projectlombok:lombok")
-	testImplementation("org.springframework.boot:spring-boot-starter-data-jpa-test")
-	testImplementation("org.springframework.boot:spring-boot-starter-webmvc-test")
+
+	// Testing
+	testImplementation("org.springframework.boot:spring-boot-starter-test")
+	testImplementation("org.springframework.boot:spring-boot-webmvc-test")
 	testRuntimeOnly("org.junit.platform:junit-platform-launcher")
+
+	// Testcontainers
+	testImplementation("org.testcontainers:testcontainers:1.20.4")
+	testImplementation("org.testcontainers:junit-jupiter:1.20.4")
+	testImplementation("org.testcontainers:postgresql:1.20.4")
+
+	// Test Lombok
+	testCompileOnly("org.projectlombok:lombok")
+	testAnnotationProcessor("org.projectlombok:lombok")
 }
 
 tasks.withType<Test> {
