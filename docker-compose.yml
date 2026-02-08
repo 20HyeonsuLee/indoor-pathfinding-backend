@@ -1,0 +1,48 @@
+services:
+  # PostgreSQL with PostGIS and pgRouting extensions
+  postgres:
+    image: pgrouting/pgrouting:latest
+    container_name: indoor-pathfinding-db
+    environment:
+      POSTGRES_DB: indoor_pathfinding
+      POSTGRES_USER: indoor
+      POSTGRES_PASSWORD: indoor1234
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U indoor -d indoor_pathfinding"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - indoor-network
+
+  # Python FastAPI Path Processing Service
+  path-service:
+    build:
+      context: ./rtab/path_service
+      dockerfile: Dockerfile
+    container_name: indoor-path-service
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./storage/uploads:/app/uploads
+      - ./storage/output:/app/output
+    environment:
+      - UPLOAD_DIR=/app/uploads
+      - OUTPUT_DIR=/app/output
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - indoor-network
+
+volumes:
+  postgres_data:
+
+networks:
+  indoor-network:
+    driver: bridge

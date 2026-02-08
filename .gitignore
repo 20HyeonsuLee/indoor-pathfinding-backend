@@ -44,3 +44,29 @@ claude/
 
 ### Secret ###
 application.yml
+
+### macOS ###
+.DS_Store
+
+### Python ###
+__pycache__/
+*.pyc
+venv/
+venv2/
+rtab/venv2/
+
+### Runtime directories ###
+storage/
+data/
+uploads/
+output/
+rtab/path_service/uploads/
+rtab/path_service/output/
+
+### Large datasets ###
+orb-slam3/data/input/rgbd_dataset_freiburg1_xyz/
+orb-slam3/data/input/rgbd_dataset_freiburg1_xyz.tgz
+orb-slam3/data/input/my_euroc/
+
+### Plans ###
+plans/

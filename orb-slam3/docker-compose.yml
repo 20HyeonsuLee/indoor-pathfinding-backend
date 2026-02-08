@@ -1,0 +1,69 @@
+version: '3.8'
+
+services:
+  orb-slam3:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: orb-slam3:latest
+    container_name: orb-slam3
+
+    # Enable GUI display (X11 forwarding)
+    environment:
+      - DISPLAY=${DISPLAY:-:0}
+      - QT_X11_NO_MITSHM=1
+
+    volumes:
+      # X11 socket for GUI display
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      # Data directories
+      - ./data/input:/data/input:ro
+      - ./data/output:/data/output:rw
+      - ./config:/data/config:ro
+      # Vocabulary (read-only)
+      - ./vocabulary:/data/vocabulary:ro
+
+    # Keep container running
+    stdin_open: true
+    tty: true
+
+    # Network settings
+    network_mode: host
+
+    # Resource limits (adjust based on your system)
+    deploy:
+      resources:
+        limits:
+          memory: 8G
+        reservations:
+          memory: 4G
+
+  # GPU-enabled version (uncomment if you have NVIDIA GPU)
+  # orb-slam3-gpu:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile.gpu
+  #   image: orb-slam3-gpu:latest
+  #   container_name: orb-slam3-gpu
+  #   environment:
+  #     - DISPLAY=${DISPLAY:-:0}
+  #     - QT_X11_NO_MITSHM=1
+  #     - NVIDIA_VISIBLE_DEVICES=all
+  #     - NVIDIA_DRIVER_CAPABILITIES=all
+  #   volumes:
+  #     - /tmp/.X11-unix:/tmp/.X11-unix:rw
+  #     - ./data/input:/data/input:ro
+  #     - ./data/output:/data/output:rw
+  #     - ./config:/data/config:ro
+  #     - ./vocabulary:/data/vocabulary:ro
+  #   stdin_open: true
+  #   tty: true
+  #   network_mode: host
+  #   runtime: nvidia
+  #   deploy:
+  #     resources:
+  #       reservations:
+  #         devices:
+  #           - driver: nvidia
+  #             count: 1
+  #             capabilities: [gpu]

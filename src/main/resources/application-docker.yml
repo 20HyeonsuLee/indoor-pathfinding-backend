@@ -1,0 +1,48 @@
+spring:
+  application:
+    name: indoor-pathfinding
+
+  # PostgreSQL + PostGIS Configuration
+  datasource:
+    url: jdbc:postgresql://localhost:5432/indoor_pathfinding
+    driver-class-name: org.postgresql.Driver
+    username: indoor
+    password: indoor1234
+
+  # JPA/Hibernate Configuration with Spatial Support
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: true
+    properties:
+      hibernate:
+        format_sql: true
+        dialect: org.hibernate.spatial.dialect.postgis.PostgisPG10Dialect
+    database-platform: org.hibernate.spatial.dialect.postgis.PostgisPG10Dialect
+
+  # File Upload Configuration
+  servlet:
+    multipart:
+      max-file-size: 500MB
+      max-request-size: 500MB
+
+# Server Configuration
+server:
+  port: 8080
+
+# Path Processing Service Configuration
+path-service:
+  base-url: http://localhost:8001
+
+# Storage Configuration
+storage:
+  maps-path: ./storage/maps
+  uploads-path: ./storage/uploads
+  output-path: ./storage/output
+
+# Logging
+logging:
+  level:
+    com.koreatech.indoor_pathfinding: DEBUG
+    org.hibernate.SQL: DEBUG
+    org.hibernate.type.descriptor.sql.BasicBinder: TRACE
