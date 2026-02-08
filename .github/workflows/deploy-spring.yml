@@ -17,7 +17,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path storage/maps
           New-Item -ItemType Directory -Force -Path storage/uploads
           New-Item -ItemType Directory -Force -Path storage/output
-        shell: pwsh
+        shell: powershell
 
       - name: Build Spring Boot image
         run: docker compose build spring-app
@@ -27,7 +27,7 @@ jobs:
 
       - name: Wait for startup
         run: Start-Sleep -Seconds 15
-        shell: pwsh
+        shell: powershell
 
       - name: Health check
         run: |
@@ -54,7 +54,7 @@ jobs:
             docker compose logs --tail=50 spring-app
             exit 1
           }
-        shell: pwsh
+        shell: powershell
 
       - name: Show running containers
         if: always()
