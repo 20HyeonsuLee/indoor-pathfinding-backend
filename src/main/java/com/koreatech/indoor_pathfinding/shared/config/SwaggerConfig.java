@@ -3,7 +3,6 @@ package com.koreatech.indoor_pathfinding.shared.config;
 import io.swagger.v3.oas.models.OpenAPI;
 import io.swagger.v3.oas.models.info.Contact;
 import io.swagger.v3.oas.models.info.Info;
-import io.swagger.v3.oas.models.servers.Server;
 import io.swagger.v3.oas.models.tags.Tag;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -39,9 +38,6 @@ public class SwaggerConfig {
                 .contact(new Contact()
                     .name("KoreaTech Indoor Pathfinding Team")
                     .url("https://github.com/20HyeonsuLee/indoor-pathfinding-backend")))
-            .servers(List.of(
-                new Server().url("http://localhost:8080").description("로컬 개발 서버")
-            ))
             .tags(List.of(
                 new Tag().name("Building").description("건물 관리 API"),
                 new Tag().name("Floor").description("층 관리 API"),
