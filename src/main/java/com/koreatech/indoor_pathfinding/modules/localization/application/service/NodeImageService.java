@@ -7,10 +7,12 @@ import com.koreatech.indoor_pathfinding.modules.scan.domain.model.ScanSession;
 import com.koreatech.indoor_pathfinding.modules.scan.domain.repository.ScanSessionRepository;
 import com.koreatech.indoor_pathfinding.shared.exception.BusinessException;
 import com.koreatech.indoor_pathfinding.shared.exception.ErrorCode;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
+import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.List;
@@ -18,13 +20,23 @@ import java.util.UUID;
 
 @Slf4j
 @Service
-@RequiredArgsConstructor
 public class NodeImageService {
 
     private static final int DEFAULT_IMAGE_COUNT = 3;
 
     private final ScanSessionRepository scanSessionRepository;
     private final RtabMapImageExtractor imageExtractor;
+    private final String imagesPath;
+
+    public NodeImageService(
+            final ScanSessionRepository scanSessionRepository,
+            final RtabMapImageExtractor imageExtractor,
+            @Value("${storage.images-path:./storage/images}") final String imagesPath
+    ) {
+        this.scanSessionRepository = scanSessionRepository;
+        this.imageExtractor = imageExtractor;
+        this.imagesPath = imagesPath;
+    }
 
     public List<NodeImageResponse> findNearbyImages(
             final UUID buildingId,
@@ -47,8 +59,29 @@ public class NodeImageService {
         }
 
         return images.stream()
-            .map(NodeImageResponse::from)
+            .map(image -> saveAndCreateResponse(buildingId, image))
             .toList();
+    }
+
+    private NodeImageResponse saveAndCreateResponse(final UUID buildingId, final NearbyNodeImage image) {
+        final String imageUrl = saveImageFile(buildingId, image);
+        return NodeImageResponse.of(image, imageUrl);
+    }
+
+    private String saveImageFile(final UUID buildingId, final NearbyNodeImage image) {
+        final Path directory = Paths.get(imagesPath, buildingId.toString());
+        final String fileName = image.nodeId() + ".jpg";
+
+        try {
+            Files.createDirectories(directory);
+            Files.write(directory.resolve(fileName), image.imageData());
+        } catch (IOException exception) {
+            log.error("Failed to save node image: {}/{}", buildingId, fileName, exception);
+            throw new BusinessException(ErrorCode.INTERNAL_SERVER_ERROR,
+                "Failed to save node image");
+        }
+
+        return "/images/" + buildingId + "/" + fileName;
     }
 
     private ScanSession findLatestSession(final UUID buildingId) {

@@ -15,7 +15,7 @@ WORKDIR /app
 
 COPY --from=build /app/build/libs/*.jar app.jar
 
-RUN mkdir -p /app/storage/maps /app/storage/uploads /app/storage/output
+RUN mkdir -p /app/storage/maps /app/storage/uploads /app/storage/output /app/storage/images
 
 EXPOSE 8080
 

@@ -52,6 +52,7 @@ services:
       - ${STORAGE_PATH:-./storage}/maps:/app/storage/maps
       - ${STORAGE_PATH:-./storage}/uploads:/app/storage/uploads
       - ${STORAGE_PATH:-./storage}/output:/app/storage/output
+      - ${STORAGE_PATH:-./storage}/images:/app/storage/images
     depends_on:
       postgres:
         condition: service_healthy

@@ -43,6 +43,7 @@ storage:
   maps-path: ./storage/maps
   uploads-path: ./storage/uploads
   output-path: ./storage/output
+  images-path: ./storage/images
 
 # Logging
 logging:

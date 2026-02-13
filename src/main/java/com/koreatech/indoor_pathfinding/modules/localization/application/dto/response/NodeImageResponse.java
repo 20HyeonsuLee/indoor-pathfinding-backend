@@ -2,8 +2,6 @@ package com.koreatech.indoor_pathfinding.modules.localization.application.dto.re
 
 import com.koreatech.indoor_pathfinding.modules.localization.infrastructure.persistence.RtabMapImageExtractor.NearbyNodeImage;
 
-import java.util.Base64;
-
 public record NodeImageResponse(
     int nodeId,
     double x,
@@ -14,10 +12,7 @@ public record NodeImageResponse(
     String imageUrl
 ) {
 
-    private static final String DATA_URI_PREFIX = "data:image/jpeg;base64,";
-
-    public static NodeImageResponse from(final NearbyNodeImage node) {
-        final String dataUri = DATA_URI_PREFIX + Base64.getEncoder().encodeToString(node.imageData());
+    public static NodeImageResponse of(final NearbyNodeImage node, final String imageUrl) {
         return new NodeImageResponse(
             node.nodeId(),
             node.x(),
@@ -25,7 +20,7 @@ public record NodeImageResponse(
             node.z(),
             node.distance(),
             node.cameraAngle(),
-            dataUri
+            imageUrl
         );
     }
 }
