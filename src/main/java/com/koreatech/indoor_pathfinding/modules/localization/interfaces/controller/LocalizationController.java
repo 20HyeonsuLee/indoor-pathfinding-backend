@@ -62,4 +62,5 @@ public class LocalizationController implements LocalizationApi {
         );
         return ResponseEntity.ok(response);
     }
+
 }

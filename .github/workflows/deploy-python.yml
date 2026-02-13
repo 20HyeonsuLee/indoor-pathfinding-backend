@@ -3,6 +3,9 @@ name: Deploy FastAPI
 on:
   workflow_dispatch:
 
+env:
+  STORAGE_PATH: C:/indoor-storage
+
 jobs:
   deploy:
     name: Build & Deploy FastAPI
@@ -14,8 +17,8 @@ jobs:
 
       - name: Create storage directories
         run: |
-          New-Item -ItemType Directory -Force -Path storage/uploads
-          New-Item -ItemType Directory -Force -Path storage/output
+          New-Item -ItemType Directory -Force -Path C:\indoor-storage\uploads
+          New-Item -ItemType Directory -Force -Path C:\indoor-storage\output
         shell: powershell
 
       - name: Build FastAPI image

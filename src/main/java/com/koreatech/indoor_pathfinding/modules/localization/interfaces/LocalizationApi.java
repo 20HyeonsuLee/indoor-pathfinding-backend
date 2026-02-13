@@ -68,4 +68,5 @@ public interface LocalizationApi {
         @Parameter(description = "건물 ID", required = true) UUID buildingId,
         NodeImageRequest request
     );
+
 }

@@ -33,6 +33,34 @@ public class RtabMapImageExtractor {
         byte[] imageData
     ) {}
 
+    public byte[] extractSingleImage(final Path dbPath, final int nodeId) {
+        validateDbFile(dbPath);
+
+        final String url = "jdbc:sqlite:" + dbPath.toAbsolutePath();
+
+        try (Connection connection = DriverManager.getConnection(url);
+             PreparedStatement statement = connection.prepareStatement("SELECT image FROM Data WHERE id = ?")) {
+
+            statement.setInt(1, nodeId);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                if (resultSet.next()) {
+                    final byte[] imageData = resultSet.getBytes("image");
+                    if (imageData != null && imageData.length > 0) {
+                        return imageData;
+                    }
+                }
+            }
+
+        } catch (SQLException exception) {
+            log.error("Failed to load image for node {} from RTAB-Map DB: {}", nodeId, dbPath, exception);
+            throw new BusinessException(ErrorCode.INTERNAL_SERVER_ERROR,
+                "Failed to load image: " + exception.getMessage());
+        }
+
+        throw new BusinessException(ErrorCode.ENTITY_NOT_FOUND,
+            "Image not found for node: " + nodeId);
+    }
+
     public List<NearbyNodeImage> extractNearbyImages(
             final Path dbPath,
             final double targetX,

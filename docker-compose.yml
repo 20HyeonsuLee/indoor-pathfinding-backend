@@ -29,8 +29,8 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - ./storage/uploads:/app/uploads
-      - ./storage/output:/app/output
+      - ${STORAGE_PATH:-./storage}/uploads:/app/uploads
+      - ${STORAGE_PATH:-./storage}/output:/app/output
     environment:
       - UPLOAD_DIR=/app/uploads
       - OUTPUT_DIR=/app/output
@@ -49,9 +49,9 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - ./storage/maps:/app/storage/maps
-      - ./storage/uploads:/app/storage/uploads
-      - ./storage/output:/app/storage/output
+      - ${STORAGE_PATH:-./storage}/maps:/app/storage/maps
+      - ${STORAGE_PATH:-./storage}/uploads:/app/storage/uploads
+      - ${STORAGE_PATH:-./storage}/output:/app/storage/output
     depends_on:
       postgres:
         condition: service_healthy
