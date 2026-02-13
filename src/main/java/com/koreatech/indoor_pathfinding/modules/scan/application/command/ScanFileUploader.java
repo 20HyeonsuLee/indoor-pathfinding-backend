@@ -3,6 +3,7 @@ package com.koreatech.indoor_pathfinding.modules.scan.application.command;
 import com.koreatech.indoor_pathfinding.modules.building.domain.model.Building;
 import com.koreatech.indoor_pathfinding.modules.building.domain.repository.BuildingRepository;
 import com.koreatech.indoor_pathfinding.modules.scan.application.dto.response.ScanSessionResponse;
+import com.koreatech.indoor_pathfinding.modules.scan.domain.event.ScanFileUploadedEvent;
 import com.koreatech.indoor_pathfinding.modules.scan.domain.model.ScanSession;
 import com.koreatech.indoor_pathfinding.modules.scan.domain.model.ScanStatus;
 import com.koreatech.indoor_pathfinding.modules.scan.domain.repository.ScanSessionRepository;
@@ -11,6 +12,7 @@ import com.koreatech.indoor_pathfinding.shared.exception.ErrorCode;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
@@ -29,6 +31,7 @@ public class ScanFileUploader {
 
     private final ScanSessionRepository scanSessionRepository;
     private final BuildingRepository buildingRepository;
+    private final ApplicationEventPublisher eventPublisher;
 
     @Value("${storage.uploads-path:./storage/uploads}")
     private String uploadsPath;
@@ -69,6 +72,8 @@ public class ScanFileUploader {
 
             building.addScanSession(session);
             ScanSession saved = scanSessionRepository.save(session);
+
+            eventPublisher.publishEvent(new ScanFileUploadedEvent(buildingId));
 
             return ScanSessionResponse.from(saved);
 

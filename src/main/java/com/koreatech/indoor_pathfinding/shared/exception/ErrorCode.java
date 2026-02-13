@@ -39,6 +39,10 @@ public enum ErrorCode {
     DESTINATION_NOT_FOUND(HttpStatus.NOT_FOUND, "PF004", "Destination not found"),
     NO_PATH_AVAILABLE(HttpStatus.NOT_FOUND, "PF005", "No path available between the specified points"),
 
+    // VPS
+    VPS_SERVICE_ERROR(HttpStatus.SERVICE_UNAVAILABLE, "V001", "VPS service error"),
+    LOCALIZATION_FAILED(HttpStatus.INTERNAL_SERVER_ERROR, "V002", "Localization failed"),
+
     // External Service
     EXTERNAL_SERVICE_ERROR(HttpStatus.SERVICE_UNAVAILABLE, "E001", "External service error");
 

@@ -34,6 +34,10 @@ server:
 path-service:
   base-url: http://indoor-path-service:8000
 
+# VPS Service Configuration
+vps-service:
+  base-url: http://indoor-vps-service:5000
+
 # Storage Configuration
 storage:
   maps-path: ./storage/maps
