@@ -36,7 +36,7 @@ path-service:
 
 # VPS Service Configuration
 vps-service:
-  base-url: http://indoor-vps-service:5000
+  base-url: http://indoor-pathfinding-web:5000
 
 # Storage Configuration
 storage:
