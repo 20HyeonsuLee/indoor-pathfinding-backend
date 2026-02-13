@@ -1,10 +1,14 @@
 package com.koreatech.indoor_pathfinding.modules.localization.interfaces.controller;
 
+import com.koreatech.indoor_pathfinding.modules.localization.application.dto.request.NodeImageRequest;
 import com.koreatech.indoor_pathfinding.modules.localization.application.dto.response.LocalizeResponse;
 import com.koreatech.indoor_pathfinding.modules.localization.application.dto.response.MapMetadataResponse;
+import com.koreatech.indoor_pathfinding.modules.localization.application.dto.response.NodeImageResponse;
 import com.koreatech.indoor_pathfinding.modules.localization.application.dto.response.SlamStatusResponse;
 import com.koreatech.indoor_pathfinding.modules.localization.application.service.LocalizationService;
+import com.koreatech.indoor_pathfinding.modules.localization.application.service.NodeImageService;
 import com.koreatech.indoor_pathfinding.modules.localization.interfaces.LocalizationApi;
+import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
@@ -21,6 +25,7 @@ import java.util.UUID;
 public class LocalizationController implements LocalizationApi {
 
     private final LocalizationService localizationService;
+    private final NodeImageService nodeImageService;
 
     @Override
     @PostMapping("/localize")
@@ -44,6 +49,17 @@ public class LocalizationController implements LocalizationApi {
     public ResponseEntity<MapMetadataResponse> getMapMetadata(
             @PathVariable final UUID buildingId) {
         final MapMetadataResponse response = localizationService.getMapMetadata(buildingId);
+        return ResponseEntity.ok(response);
+    }
+
+    @Override
+    @PostMapping("/node-images")
+    public ResponseEntity<List<NodeImageResponse>> findNearbyNodeImages(
+            @PathVariable final UUID buildingId,
+            @Valid @RequestBody final NodeImageRequest request) {
+        final List<NodeImageResponse> response = nodeImageService.findNearbyImages(
+            buildingId, request.x(), request.y(), request.z()
+        );
         return ResponseEntity.ok(response);
     }
 }

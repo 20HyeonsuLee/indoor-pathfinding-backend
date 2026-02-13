@@ -45,6 +45,9 @@ dependencies {
 	// File Upload
 	implementation("commons-io:commons-io:2.15.1")
 
+	// SQLite (RTAB-Map .db file reading)
+	implementation("org.xerial:sqlite-jdbc:3.47.1.0")
+
 	// HTTP Client for Python service communication
 	implementation("org.springframework.boot:spring-boot-starter-webflux")
 

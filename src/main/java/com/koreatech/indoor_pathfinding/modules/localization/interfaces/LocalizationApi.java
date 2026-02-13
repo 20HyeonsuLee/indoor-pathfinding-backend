@@ -1,7 +1,9 @@
 package com.koreatech.indoor_pathfinding.modules.localization.interfaces;
 
+import com.koreatech.indoor_pathfinding.modules.localization.application.dto.request.NodeImageRequest;
 import com.koreatech.indoor_pathfinding.modules.localization.application.dto.response.LocalizeResponse;
 import com.koreatech.indoor_pathfinding.modules.localization.application.dto.response.MapMetadataResponse;
+import com.koreatech.indoor_pathfinding.modules.localization.application.dto.response.NodeImageResponse;
 import com.koreatech.indoor_pathfinding.modules.localization.application.dto.response.SlamStatusResponse;
 import com.koreatech.indoor_pathfinding.shared.exception.ErrorResponse;
 import io.swagger.v3.oas.annotations.Operation;
@@ -51,5 +53,19 @@ public interface LocalizationApi {
     })
     ResponseEntity<MapMetadataResponse> getMapMetadata(
         @Parameter(description = "건물 ID", required = true) UUID buildingId
+    );
+
+    @Operation(summary = "노드 근처 이미지 조회",
+        description = "특정 좌표 근처의 RTAB-Map 카메라 이미지 3장을 반환합니다. 최대한 다른 방향에서 촬영된 이미지를 선택합니다.")
+    @ApiResponses({
+        @ApiResponse(responseCode = "200", description = "이미지 조회 성공"),
+        @ApiResponse(responseCode = "400", description = "잘못된 좌표",
+            content = @Content(schema = @Schema(implementation = ErrorResponse.class))),
+        @ApiResponse(responseCode = "404", description = "스캔 세션 또는 이미지 없음",
+            content = @Content(schema = @Schema(implementation = ErrorResponse.class)))
+    })
+    ResponseEntity<List<NodeImageResponse>> findNearbyNodeImages(
+        @Parameter(description = "건물 ID", required = true) UUID buildingId,
+        NodeImageRequest request
     );
 }
