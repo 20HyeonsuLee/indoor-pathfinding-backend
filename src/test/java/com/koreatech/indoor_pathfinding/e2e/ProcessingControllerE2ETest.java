@@ -83,9 +83,9 @@ class ProcessingControllerE2ETest extends BaseE2ETest {
         }
 
         @Test
-        @DisplayName("should return 400 when session is not in UPLOADED state")
+        @DisplayName("should return 400 when session is currently being processed")
         void startProcessing_WithInvalidSessionState_ReturnsBadRequest() throws Exception {
-            ScanSession session = createTestScanSession(testBuilding, "test_scan.db", ScanStatus.COMPLETED);
+            ScanSession session = createTestScanSession(testBuilding, "test_scan.db", ScanStatus.EXTRACTING);
 
             ProcessingStartRequest request = new ProcessingStartRequest(session.getId());
 

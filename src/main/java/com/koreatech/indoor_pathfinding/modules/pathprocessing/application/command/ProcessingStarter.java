@@ -34,9 +34,9 @@ public class ProcessingStarter {
     public ProcessingStartResponse start(UUID buildingId, UUID sessionId) {
         ScanSession session = scanSessionReader.findEntityById(sessionId);
 
-        if (session.getStatus() != ScanStatus.UPLOADED) {
+        if (!canStartProcessing(session.getStatus())) {
             throw new BusinessException(ErrorCode.INVALID_BUILDING_STATUS,
-                "Scan session is not in UPLOADED state");
+                "Scan session cannot be processed in current state: " + session.getStatus());
         }
 
         String fileId = pathProcessingClient.uploadFile(Paths.get(session.getFilePath()));
@@ -57,5 +57,9 @@ public class ProcessingStarter {
 
     public static UUID getSessionIdForJob(String jobId) {
         return jobToSessionMap.get(jobId);
+    }
+
+    private boolean canStartProcessing(ScanStatus status) {
+        return status != ScanStatus.EXTRACTING && status != ScanStatus.PROCESSING;
     }
 }
