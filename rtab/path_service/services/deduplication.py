@@ -167,12 +167,21 @@ def merge_overlapping_segments(
     # 결과 경로 (첫 포인트로 초기화)
     result = [positions[0]]
     i = 1
+    # KD-Tree 재구축 간격 (매번 구축하면 비용이 크므로 주기적으로)
+    tree_rebuild_interval = max(50, len(positions) // 20)
+    path_tree = None
+    last_tree_size = 0
 
     while i < len(positions):
         current = positions[i]
 
+        # KD-Tree 주기적 재구축 (경로가 충분히 길 때만)
+        if len(result) >= 10 and len(result) - last_tree_size >= tree_rebuild_interval:
+            path_tree = cKDTree(np.array(result[:-1]))
+            last_tree_size = len(result)
+
         # 현재 위치가 이전 경로의 어딘가와 가까운지 확인
-        revisit_idx = _find_revisit_point(result, current, overlap_threshold)
+        revisit_idx = _find_revisit_point(result, current, overlap_threshold, path_tree)
 
         # 재방문이 감지되었고, 충분히 이전 지점인 경우
         if revisit_idx is not None and revisit_idx < len(result) - 2:
@@ -198,25 +207,39 @@ def merge_overlapping_segments(
 def _find_revisit_point(
     path: List[np.ndarray],
     point: np.ndarray,
-    threshold: float
+    threshold: float,
+    path_tree: Optional[cKDTree] = None
 ) -> Optional[int]:
     """
     현재 포인트가 이전 경로의 어느 지점을 재방문하는지 찾습니다.
 
-    [역할]
-    - 경로의 각 포인트와 현재 포인트의 거리 계산
-    - threshold 이내의 가장 가까운 이전 포인트 인덱스 반환
+    KD-Tree를 사용하여 O(log N) 탐색합니다.
+    path_tree가 제공되지 않으면 선형 탐색으로 폴백합니다.
 
     Args:
         path: 지금까지 구성된 경로 (리스트)
         point: 현재 검사할 포인트
         threshold: 재방문 판정 거리
+        path_tree: 미리 구축된 KD-Tree (선택)
 
     Returns:
         재방문 포인트의 인덱스, 없으면 None
     """
-    # 마지막 포인트는 제외 (바로 직전 포인트와의 비교는 의미 없음)
-    for i, p in enumerate(path[:-1]):
+    if len(path) < 2:
+        return None
+
+    # 마지막 포인트 제외한 검색 대상
+    search_path = path[:-1]
+
+    if path_tree is not None and len(search_path) >= 10:
+        # KD-Tree 기반 탐색 — O(log N)
+        dist, idx = path_tree.query(point)
+        if dist < threshold and idx < len(search_path):
+            return idx
+        return None
+
+    # 선형 탐색 폴백 (경로가 짧을 때)
+    for i, p in enumerate(search_path):
         distance = np.linalg.norm(np.array(p) - point)
         if distance < threshold:
             return i

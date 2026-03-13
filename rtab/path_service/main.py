@@ -21,11 +21,13 @@
 [처리 파이프라인]
 1. DB 파일 업로드
 2. 궤적 추출 (extraction)
-3. 층 분리 & 수직통로 감지 (vertical_detector)
-4. 중복 제거 (deduplication)
-5. RDP + 직선 스냅 (path_flattening) - 경로 직선화
-6. 갈림길 감지 & 그래프 추출 (junction_detection)
-7. 결과 JSON 반환
+3. XY 스무딩 (smoothing) - Z축 보존하여 계단 감지 보호
+4. 수직통로 감지 & 층 분리 (vertical_detector)
+5. 층별 가우시안 스무딩 (smoothing) - 중복 제거 전 노이즈 감소
+6. 중복 제거 (deduplication)
+7. RDP + 직선 스냅 (path_flattening) - 경로 직선화
+8. 갈림길 감지 & 그래프 추출 (junction_detection)
+9. 결과 JSON 반환
 
 [API 엔드포인트]
 - POST /api/v1/upload              : DB 파일 업로드
@@ -53,7 +55,7 @@ import numpy as np
 # 서비스 모듈 임포트
 from services.extraction import extract_trajectory_from_db, get_trajectory_stats
 from services.deduplication import deduplicate_path, merge_overlapping_segments
-from services.smoothing import remove_outliers
+from services.smoothing import remove_outliers, smooth_path_gapaware
 from services.path_flattening import snap_to_lines
 from services.vertical_detector import detect_stairs_first, separate_floors, assign_floors_to_stairs
 from services.junction_detection import build_path_graph, get_graph_stats, merge_floor_graphs
@@ -382,13 +384,30 @@ async def process_path_async(job_id: str, file_path: str):
         job.message = f"궤적 추출 완료: {len(raw_positions)}개 포인트"
 
         # ─────────────────────────────────────────────────────────────────
+        # Step 1.5: XY축 스무딩 (계단 감지 전, Z축 보존)
+        # ─────────────────────────────────────────────────────────────────
+        job.progress = 12
+        job.message = "XY 노이즈 제거 중..."
+
+        def _smooth_xy_only(positions: np.ndarray) -> np.ndarray:
+            """Z축을 보존하면서 XY만 가우시안 스무딩"""
+            from services.smoothing import smooth_path
+            smoothed = smooth_path(positions, sigma=1.5)
+            # Z축은 원본 유지 (계단 감지 보호)
+            smoothed[:, 2] = positions[:, 2]
+            return smoothed
+
+        xy_smoothed = await asyncio.to_thread(_smooth_xy_only, raw_positions)
+
+        # ─────────────────────────────────────────────────────────────────
         # Step 2: 수직 통로 감지 (25%)
         # ─────────────────────────────────────────────────────────────────
         job.progress = 15
         job.message = "계단/엘리베이터 감지 중..."
 
+        # 원본 Z값을 사용하여 계단 감지 (XY 스무딩된 좌표로)
         vertical_passages, stair_mask = await asyncio.to_thread(
-            detect_stairs_first, raw_positions
+            detect_stairs_first, xy_smoothed
         )
 
         job.progress = 25
@@ -402,11 +421,24 @@ async def process_path_async(job_id: str, file_path: str):
         job.message = "층 분리 중..."
 
         floors_data = await asyncio.to_thread(
-            separate_floors, raw_positions, node_ids, stair_mask=stair_mask
+            separate_floors, xy_smoothed, node_ids, stair_mask=stair_mask
         )
 
         # 수직 통로에 층 정보 할당
         vertical_passages = assign_floors_to_stairs(vertical_passages, floors_data)
+
+        # 층 분리 결과 검증
+        if not floors_data:
+            # 계단만 있고 평면 포인트가 없는 경우: 전체를 단일 층으로 처리
+            floors_data = {1: {
+                'positions': xy_smoothed[~stair_mask] if stair_mask.any() else xy_smoothed,
+                'node_ids': [nid for nid, m in zip(node_ids, stair_mask) if not m] if stair_mask.any() else node_ids,
+                'indices': np.where(~stair_mask)[0] if stair_mask.any() else np.arange(len(xy_smoothed)),
+                'z_mean': float(np.mean(xy_smoothed[:, 2])),
+                'z_min': float(xy_smoothed[:, 2].min()),
+                'z_max': float(xy_smoothed[:, 2].max()),
+                'point_count': int((~stair_mask).sum()) if stair_mask.any() else len(xy_smoothed)
+            }}
 
         job.progress = 35
         floor_count = len(floors_data)
@@ -420,11 +452,21 @@ async def process_path_async(job_id: str, file_path: str):
 
         deduplicated_floors = {}
         for floor_level, floor_data in floors_data.items():
-            # 이상치 제거
-            cleaned = await asyncio.to_thread(remove_outliers, floor_data['positions'])
+            positions = floor_data['positions']
+
+            # 포인트 부족 시 스킵
+            if len(positions) < 3:
+                deduplicated_floors[floor_level] = positions
+                continue
+
+            # 층별 가우시안 스무딩 (중복 제거 전에 적용하여 정확도 향상)
+            # 같은 층 내에서는 Z축 스무딩도 안전
+            smoothed = await asyncio.to_thread(
+                smooth_path_gapaware, positions, sigma=1.5, gap_threshold=5.0
+            )
             # 왕복 구간 병합
             merged = await asyncio.to_thread(
-                merge_overlapping_segments, cleaned, overlap_threshold=1.0
+                merge_overlapping_segments, smoothed, overlap_threshold=1.0
             )
             # 공간적 중복 제거
             deduplicated = await asyncio.to_thread(
@@ -558,6 +600,11 @@ def _build_processing_result(
     # 층별 경로 데이터 생성
     for floor_level, positions in smoothed_floors.items():
         positions = np.array(positions)
+
+        # 빈 배열 또는 단일 포인트 보호
+        if len(positions) < 2:
+            continue
+
         segments = []
 
         for i in range(len(positions) - 1):
@@ -786,11 +833,18 @@ async def get_preview_image(job_id: str, image_type: str):
         400: 잘못된 이미지 타입
         404: 이미지를 찾을 수 없음
     """
-    if image_type not in ['raw', 'processed']:
+    allowed_types = {'raw', 'processed', 'comparison'}
+    if image_type not in allowed_types:
         raise HTTPException(
             status_code=400,
-            detail="이미지 타입은 'raw' 또는 'processed'만 가능합니다."
+            detail=f"이미지 타입은 {allowed_types} 중 하나여야 합니다."
         )
+
+    # job_id 형식 검증 (UUID만 허용, path traversal 방지)
+    try:
+        uuid.UUID(job_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="잘못된 작업 ID 형식입니다.")
 
     image_path = os.path.join(OUTPUT_DIR, f"{job_id}_{image_type}.png")
 

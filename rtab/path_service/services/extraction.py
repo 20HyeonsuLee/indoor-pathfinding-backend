@@ -114,17 +114,22 @@ def get_position_from_matrix(matrix: np.ndarray) -> Optional[np.ndarray]:
     return matrix[:, 3]
 
 
-def is_valid_position(position: np.ndarray) -> bool:
+def is_valid_position(position: np.ndarray, matrix: np.ndarray = None) -> bool:
     """
     유효한 위치인지 검증합니다.
 
     [무효 케이스]
     - None 값
-    - 원점 (0, 0, 0) - 초기화 전 또는 실패한 pose
     - NaN 또는 무한대 값
+    - 변환 행렬 전체가 0 (pose 계산 실패)
+
+    [원점 근처 좌표 허용]
+    건물이 원점에 위치할 수 있으므로, 이동 벡터만 0인 경우와
+    행렬 전체가 0인 경우(pose 미계산)를 구분합니다.
 
     Args:
         position: 검증할 위치 벡터
+        matrix: 원본 3x4 변환 행렬 (선택)
 
     Returns:
         유효하면 True, 아니면 False
@@ -136,9 +141,14 @@ def is_valid_position(position: np.ndarray) -> bool:
     if not np.isfinite(position).all():
         return False
 
-    # 원점 체크 (매우 작은 값도 무효로 처리)
-    if np.allclose(position, [0, 0, 0], atol=1e-6):
-        return False
+    # 행렬 전체가 0이면 pose 계산 실패 (원점과 구분)
+    if matrix is not None:
+        if np.allclose(matrix, 0, atol=1e-6):
+            return False
+    else:
+        # 행렬 없이 호출된 경우: 위치만으로 판단
+        if np.allclose(position, 0, atol=1e-6):
+            return False
 
     return True
 
@@ -183,6 +193,15 @@ def extract_trajectory_from_db(db_path: str) -> Tuple[np.ndarray, List[int]]:
     cursor = conn.cursor()
 
     try:
+        # DB 스키마 검증
+        cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='Node'"
+        )
+        if cursor.fetchone() is None:
+            raise ValueError(
+                f"유효한 RTAB-Map DB가 아닙니다 (Node 테이블 없음): {db_path}"
+            )
+
         # 모든 노드의 pose 조회 (id 순서대로 = 시간 순서)
         cursor.execute('SELECT id, pose FROM Node ORDER BY id')
         rows = cursor.fetchall()
@@ -201,8 +220,8 @@ def extract_trajectory_from_db(db_path: str) -> Tuple[np.ndarray, List[int]]:
             # Step 2: 행렬 → 위치 벡터
             position = get_position_from_matrix(matrix)
 
-            # Step 3: 유효성 검증
-            if is_valid_position(position):
+            # Step 3: 유효성 검증 (행렬 전체 0 = pose 미계산 vs 원점 위치 구분)
+            if is_valid_position(position, matrix):
                 positions.append(position)
                 node_ids.append(node_id)
 

@@ -439,6 +439,25 @@ def extract_path_edges(
     # 노드를 original_index로 정렬
     sorted_nodes = sorted(nodes, key=lambda n: n.original_index)
 
+    # 적응형 max_distance: 평균 노드 간격의 5배까지 허용
+    # 하드코딩된 3.0m 대신 실제 노드 배치에 맞게 조정
+    if len(sorted_nodes) >= 2:
+        sample_distances = []
+        for i in range(min(10, len(sorted_nodes) - 1)):
+            d = _calculate_path_distance(
+                positions,
+                sorted_nodes[i].original_index,
+                sorted_nodes[i + 1].original_index
+            )
+            if d > 0:
+                sample_distances.append(d)
+        if sample_distances:
+            adaptive_max = max(max_distance, np.mean(sample_distances) * 5)
+        else:
+            adaptive_max = max_distance
+    else:
+        adaptive_max = max_distance
+
     # Step 1: 연속 노드 간 엣지 생성
     for i in range(len(sorted_nodes) - 1):
         node1 = sorted_nodes[i]
@@ -450,8 +469,8 @@ def extract_path_edges(
 
         path_distance = _calculate_path_distance(positions, start_idx, end_idx)
 
-        # 최대 거리 체크 (너무 먼 노드는 연결하지 않음)
-        if path_distance <= max_distance:
+        # 적응형 최대 거리 체크
+        if path_distance <= adaptive_max:
             edges.append(PathEdge(
                 id=str(uuid.uuid4()),
                 from_node_id=node1.id,
@@ -487,9 +506,11 @@ def _calculate_path_distance(
     if start_idx >= end_idx:
         return 0.0
 
-    total_distance = 0.0
+    # 인덱스 범위 보호
+    safe_end = min(end_idx, len(positions) - 1)
 
-    for i in range(start_idx, end_idx):
+    total_distance = 0.0
+    for i in range(start_idx, safe_end):
         segment_distance = np.linalg.norm(positions[i + 1] - positions[i])
         total_distance += segment_distance
 
@@ -657,15 +678,26 @@ def merge_floor_graphs(
         to_floor = passage.get('to_floor')
         passage_type = passage.get('type', 'STAIRCASE')
 
+        # 수직통로 데이터 검증
+        entry_point = passage.get('entry_point')
+        exit_point = passage.get('exit_point')
+
+        if not entry_point or not exit_point:
+            continue
+        if not all(k in entry_point for k in ('x', 'y', 'z')):
+            continue
+        if not all(k in exit_point for k in ('x', 'y', 'z')):
+            continue
+
         # 각 층의 가장 가까운 노드 찾기
         entry_node = _find_nearest_node_to_position(
             all_nodes,
-            passage.get('entry_point'),
+            entry_point,
             floor_level=from_floor
         )
         exit_node = _find_nearest_node_to_position(
             all_nodes,
-            passage.get('exit_point'),
+            exit_point,
             floor_level=to_floor
         )
 

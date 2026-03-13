@@ -128,25 +128,37 @@ def detect_stairs_first(
     # Step 1: 슬라이딩 윈도우로 수직 이동 구간 찾기
     changing_z = np.zeros(n, dtype=bool)
 
-    for i in range(n - window_size):
+    # 윈도우 크기에 독립적인 임계값 사용 (window_size/20 결합 제거)
+    effective_threshold = min_total_z_change * 0.5
+
+    # 경로 끝부분도 검사하기 위해 윈도우 크기를 점진적으로 축소
+    for i in range(n - 1):
+        # 남은 포인트에 맞게 윈도우 크기 조정
+        current_window = min(window_size, n - i - 1)
+        if current_window < min_stair_points:
+            break
+
         # 윈도우 내 총 Z 변화
-        window_z_change = z[i + window_size] - z[i]
+        window_z_change = z[i + current_window] - z[i]
+
+        # 윈도우 크기에 비례하여 임계값 스케일링
+        scaled_threshold = effective_threshold * (current_window / window_size)
 
         # 충분한 Z 변화가 있는지 확인
-        if abs(window_z_change) > min_total_z_change * (window_size / 20):
+        if abs(window_z_change) > scaled_threshold:
             # 방향 일관성 확인 (올라가기만 또는 내려가기만)
-            window_diff = z_diff[i:i + window_size]
+            window_diff = z_diff[i:i + current_window]
 
             if window_z_change > 0:
                 # 올라가는 경우: 양수 변화가 절반 이상
-                consistent = np.sum(window_diff > z_change_threshold / 2) > window_size * 0.5
+                consistent = np.sum(window_diff > z_change_threshold / 2) > current_window * 0.5
             else:
                 # 내려가는 경우: 음수 변화가 절반 이상
-                consistent = np.sum(window_diff < -z_change_threshold / 2) > window_size * 0.5
+                consistent = np.sum(window_diff < -z_change_threshold / 2) > current_window * 0.5
 
             if consistent:
                 # 해당 윈도우를 수직 이동으로 표시
-                changing_z[i:i + window_size + 1] = True
+                changing_z[i:i + current_window + 1] = True
 
     # Step 2: 연속된 수직 이동 구간을 그룹화
     stair_segments = []
@@ -393,10 +405,18 @@ def _cluster_z_values(
     min_count = len(z_values) * 0.03  # 최소 3% 이상
     peaks = _find_histogram_peaks(smoothed_hist, bin_edges, min_count, threshold)
 
-    # 피크를 찾지 못한 경우 균등 분할
+    # 피크를 찾지 못한 경우: 빈 크기를 키워서 재시도 후 폴백
     if len(peaks) == 0:
-        num_floors = max(1, int(z_range / threshold) + 1)
-        peaks = [z_min + (i + 0.5) * (z_range / num_floors) for i in range(num_floors)]
+        # 재시도: 더 큰 빈(1.0m)과 낮은 min_count로 피크 탐색
+        coarse_bins = max(int(z_range / 1.0), 5)
+        coarse_hist, coarse_edges = np.histogram(z_values, bins=coarse_bins)
+        coarse_smoothed = gaussian_filter1d(coarse_hist.astype(float), sigma=1.0)
+        coarse_min_count = len(z_values) * 0.02
+        peaks = _find_histogram_peaks(coarse_smoothed, coarse_edges, coarse_min_count, threshold)
+
+    # 그래도 실패하면 중앙값 기반 단일 층
+    if len(peaks) == 0:
+        peaks = [float(np.median(z_values))]
 
     peaks = sorted(peaks)
 

@@ -102,11 +102,15 @@ def split_at_gaps(
     segments = []
     prev = 0
     for idx in split_indices:
-        if idx - prev >= 2:
+        if idx - prev >= 1:
             segments.append(positions[prev:idx])
         prev = idx
-    if len(positions) - prev >= 2:
+    if len(positions) - prev >= 1:
         segments.append(positions[prev:])
+
+    # 빈 결과 방지
+    if len(segments) == 0:
+        return [positions]
 
     return segments
 
@@ -268,8 +272,8 @@ def smooth_path_spline(
 
         return smoothed
 
-    except Exception:
-        # 스플라인 실패 시 가우시안으로 폴백
+    except (ValueError, TypeError, np.linalg.LinAlgError) as e:
+        # 스플라인 수치 계산 실패 시 가우시안으로 폴백
         return smooth_path(positions)
 
 
@@ -347,7 +351,12 @@ def adaptive_smooth(
         # 가우시안 가중치 계산
         indices = np.arange(start, end)
         weights = np.exp(-0.5 * ((indices - i) / sigma) ** 2)
-        weights /= weights.sum()  # 정규화 (합 = 1)
+        weight_sum = weights.sum()
+        if weight_sum < 1e-10:
+            # 가중치 합이 0에 근접하면 원본 유지
+            smoothed[i] = positions[i]
+            continue
+        weights /= weight_sum  # 정규화 (합 = 1)
 
         # 가중 평균으로 스무딩
         smoothed[i] = np.sum(
