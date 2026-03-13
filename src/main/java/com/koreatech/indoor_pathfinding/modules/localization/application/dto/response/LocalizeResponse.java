@@ -6,7 +6,8 @@ public record LocalizeResponse(
     Map<String, Object> pose,
     Double confidence,
     String mapId,
-    Integer numMatches
+    Integer numMatches,
+    Integer matchedImageIndex
 ) {
 
     @SuppressWarnings("unchecked")
@@ -15,7 +16,8 @@ public record LocalizeResponse(
             (Map<String, Object>) raw.get("pose"),
             raw.get("confidence") != null ? ((Number) raw.get("confidence")).doubleValue() : null,
             (String) raw.get("map_id"),
-            raw.get("num_matches") != null ? ((Number) raw.get("num_matches")).intValue() : null
+            raw.get("num_matches") != null ? ((Number) raw.get("num_matches")).intValue() : null,
+            raw.get("matched_image_index") != null ? ((Number) raw.get("matched_image_index")).intValue() : null
         );
     }
 }
