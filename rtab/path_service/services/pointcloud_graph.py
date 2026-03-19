@@ -15,7 +15,7 @@ from scipy.ndimage import distance_transform_edt
 from collections import deque
 
 
-CELL_SIZE = 0.15  # 점유 격자 해상도 (미터/셀)
+CELL_SIZE = 0.3   # 점유 격자 해상도 (미터/셀) — 크게 할수록 노드 줄어듦
 
 
 # =============================================================================
@@ -403,7 +403,7 @@ def skeletonize(binary_image):
     return img
 
 
-SPUR_MIN_LENGTH = 3.0  # 이 길이(미터) 미만인 가지는 제거
+SPUR_MIN_LENGTH = 5.0  # 이 길이(미터) 미만인 가지는 제거
 
 
 def remove_spurs(skeleton, cell_size=CELL_SIZE, min_length=SPUR_MIN_LENGTH):
@@ -487,8 +487,9 @@ def remove_spurs(skeleton, cell_size=CELL_SIZE, min_length=SPUR_MIN_LENGTH):
 # Step 6: 스켈레톤에서 그래프 추출
 # =============================================================================
 
-WAYPOINT_INTERVAL = 1.5  # 중간 노드 배치 간격 (미터)
-SMOOTH_WINDOW = 11       # 경로 스무딩 윈도우 크기
+WAYPOINT_INTERVAL = 3.0  # 중간 노드 배치 간격 (미터)
+SMOOTH_WINDOW = 15       # 경로 스무딩 윈도우 크기
+MIN_EDGE_LENGTH = 1.0    # 이 길이 미만인 엣지는 병합
 
 
 def _smooth_path_pixels(path, window=SMOOTH_WINDOW):
@@ -1069,6 +1070,9 @@ def build_pointcloud_graph(db_path):
         fdata['nodes'] = nodes
         fdata['edges'] = edges
 
+        # 짧은 엣지 병합: 연결 수 2인 노드(통과 노드)가 짧은 엣지를 가지면 제거
+        nodes, edges = _merge_short_edges(nodes, edges, MIN_EDGE_LENGTH)
+
         floor_level = fi + 1
         nodes_dict = _convert_nodes(nodes, floor_level)
         edges_dict = _convert_edges(edges, nodes_dict)
@@ -1076,6 +1080,78 @@ def build_pointcloud_graph(db_path):
         node_id_offset += len(nodes)
 
     return floor_graphs, floors, peaks, world_points, cam_positions
+
+
+def _merge_short_edges(nodes, edges, min_length):
+    """
+    짧은 엣지의 중간 노드를 제거하고 양쪽 엣지를 하나로 합친다.
+
+    연결 수 2인 노드(직선 통과 노드)가 짧은 엣지를 가지면:
+    A --short-- B -- C  →  A -- C (B 제거)
+    """
+    changed = True
+    while changed:
+        changed = False
+
+        # 각 노드의 연결 엣지 수 계산
+        conn_count = {}
+        for e in edges:
+            conn_count[e['from']] = conn_count.get(e['from'], 0) + 1
+            conn_count[e['to']] = conn_count.get(e['to'], 0) + 1
+
+        node_ids = {n['id'] for n in nodes}
+        remove_nodes = set()
+
+        for e in edges:
+            if e['distance'] >= min_length:
+                continue
+
+            # 짧은 엣지의 양쪽 노드 중 연결 수 2인 놈을 제거
+            for nid in [e['from'], e['to']]:
+                if nid in remove_nodes:
+                    continue
+                if conn_count.get(nid, 0) != 2:
+                    continue
+                # 이 노드에 연결된 2개 엣지 찾기
+                connected = [x for x in edges if x['from'] == nid or x['to'] == nid]
+                if len(connected) != 2:
+                    continue
+
+                # 반대쪽 노드들 찾기
+                e1, e2 = connected
+                other1 = e1['to'] if e1['from'] == nid else e1['from']
+                other2 = e2['to'] if e2['from'] == nid else e2['from']
+
+                if other1 == other2:
+                    continue
+
+                # 새 엣지 생성 (other1 → other2)
+                n1 = next((n for n in nodes if n['id'] == other1), None)
+                n2 = next((n for n in nodes if n['id'] == other2), None)
+                if not n1 or not n2:
+                    continue
+
+                new_dist = np.sqrt((n1['x'] - n2['x'])**2 + (n1['y'] - n2['y'])**2)
+                edges.append({
+                    'from': other1,
+                    'to': other2,
+                    'distance': float(new_dist),
+                })
+
+                # 기존 2개 엣지 제거
+                edges.remove(e1)
+                edges.remove(e2)
+                remove_nodes.add(nid)
+                changed = True
+                break
+
+            if changed:
+                break
+
+        if remove_nodes:
+            nodes = [n for n in nodes if n['id'] not in remove_nodes]
+
+    return nodes, edges
 
 
 def _convert_nodes(pc_nodes, floor_level):
