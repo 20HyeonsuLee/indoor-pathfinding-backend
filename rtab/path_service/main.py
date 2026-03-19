@@ -430,17 +430,24 @@ async def process_path_async(job_id: str, file_path: str):
         graph_stats = get_graph_stats(all_nodes, all_edges)
 
         # smoothed_floors 생성 (결과 빌더 호환)
+        # 엣지를 따라 노드 좌표를 연결한 경로로 구성
         smoothed_floors = {}
-        for fi, fdata in sorted(pc_floors.items()):
-            floor_level = fi + 1
-            cam_pos = fdata.get('cam_positions', np.empty((0, 3)))
-            if len(cam_pos) > 0:
-                smoothed_floors[floor_level] = cam_pos
-        for floor_level, (nodes, _) in floor_graphs.items():
-            if floor_level not in smoothed_floors and nodes:
-                smoothed_floors[floor_level] = np.array(
-                    [[n['x'], n['y'], n['z']] for n in nodes]
-                )
+        for floor_level, (nodes, edges) in floor_graphs.items():
+            if not nodes:
+                continue
+            # 노드 id → 좌표 매핑
+            node_by_id = {n['id']: n for n in nodes}
+            # 엣지 순서대로 좌표 수집 (중복 제거)
+            seen = set()
+            positions = []
+            for e in edges:
+                for nid in [e['from_node_id'], e['to_node_id']]:
+                    if nid not in seen:
+                        seen.add(nid)
+                        n = node_by_id[nid]
+                        positions.append([n['x'], n['y'], n['z']])
+            if positions:
+                smoothed_floors[floor_level] = np.array(positions)
 
         job.progress = 85
         job.message = f"그래프 구축 완료: 노드 {len(all_nodes)}개, 엣지 {len(all_edges)}개"
