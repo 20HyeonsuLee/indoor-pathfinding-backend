@@ -429,25 +429,35 @@ async def process_path_async(job_id: str, file_path: str):
 
         graph_stats = get_graph_stats(all_nodes, all_edges)
 
-        # smoothed_floors 생성 (결과 빌더 호환)
-        # 엣지를 따라 노드 좌표를 연결한 경로로 구성
-        smoothed_floors = {}
+        # floor_segments 생성: 실제 그래프 엣지를 segments로 변환
+        # GraphBuilder가 segment의 start→end를 엣지로 만들므로
+        # 포인트클라우드 그래프의 엣지를 그대로 segment로 전달
+        floor_segments = {}
         for floor_level, (nodes, edges) in floor_graphs.items():
-            if not nodes:
+            if not nodes or not edges:
                 continue
-            # 노드 id → 좌표 매핑
             node_by_id = {n['id']: n for n in nodes}
-            # 엣지 순서대로 좌표 수집 (중복 제거)
-            seen = set()
-            positions = []
-            for e in edges:
-                for nid in [e['from_node_id'], e['to_node_id']]:
-                    if nid not in seen:
-                        seen.add(nid)
-                        n = node_by_id[nid]
-                        positions.append([n['x'], n['y'], n['z']])
-            if positions:
-                smoothed_floors[floor_level] = np.array(positions)
+            segs = []
+            for i, e in enumerate(edges):
+                fn = node_by_id.get(e['from_node_id'])
+                tn = node_by_id.get(e['to_node_id'])
+                if not fn or not tn:
+                    continue
+                segs.append({
+                    "sequence_order": i,
+                    "start_point": {"x": fn['x'], "y": fn['y'], "z": fn['z']},
+                    "end_point": {"x": tn['x'], "y": tn['y'], "z": tn['z']},
+                    "length": e['distance'],
+                })
+            floor_segments[floor_level] = segs
+
+        # smoothed_floors (미리보기 이미지용, 카메라 궤적)
+        smoothed_floors = {}
+        for fi, fdata in sorted(pc_floors.items()):
+            floor_level = fi + 1
+            cam_pos = fdata.get('cam_positions', np.empty((0, 3)))
+            if len(cam_pos) > 0:
+                smoothed_floors[floor_level] = cam_pos
 
         job.progress = 85
         job.message = f"그래프 구축 완료: 노드 {len(all_nodes)}개, 엣지 {len(all_edges)}개"
@@ -485,7 +495,8 @@ async def process_path_async(job_id: str, file_path: str):
             all_edges=all_edges,
             preview_paths=preview_paths,
             trajectory_stats=trajectory_stats,
-            graph_stats=graph_stats
+            graph_stats=graph_stats,
+            floor_segments=floor_segments
         )
 
         # 완료
@@ -512,80 +523,95 @@ def _build_processing_result(
     all_edges: list,
     preview_paths: dict,
     trajectory_stats: dict,
-    graph_stats: dict
+    graph_stats: dict,
+    floor_segments: dict = None
 ) -> dict:
     """
     처리 결과 응답 데이터를 생성합니다.
-
-    Args:
-        job_id: 작업 ID
-        raw_positions: 원본 좌표
-        smoothed_floors: 층별 스무딩된 좌표
-        vertical_passages: 수직 통로 리스트
-        all_nodes: 전체 노드 리스트
-        all_edges: 전체 엣지 리스트
-        preview_paths: 미리보기 이미지 경로
-        trajectory_stats: 궤적 통계
-        graph_stats: 그래프 통계
-
-    Returns:
-        결과 딕셔너리
     """
     floor_paths = []
     total_distance = 0
 
-    # 층별 경로 데이터 생성
-    for floor_level, positions in smoothed_floors.items():
-        positions = np.array(positions)
+    if floor_segments:
+        # 포인트클라우드 모드: 실제 그래프 엣지를 segments로 직접 사용
+        for floor_level, segments in floor_segments.items():
+            if not segments:
+                continue
 
-        # 빈 배열 또는 단일 포인트 보호
-        if len(positions) < 2:
-            continue
+            floor_distance = sum(s["length"] for s in segments)
+            total_distance += floor_distance
 
-        segments = []
+            # 모든 좌표에서 bounds 계산
+            all_x = []
+            all_y = []
+            for s in segments:
+                all_x.extend([s["start_point"]["x"], s["end_point"]["x"]])
+                all_y.extend([s["start_point"]["y"], s["end_point"]["y"]])
 
-        for i in range(len(positions) - 1):
-            start = positions[i]
-            end = positions[i + 1]
-            length = float(np.linalg.norm(end - start))
-            total_distance += length
+            floor_name = f"{floor_level}층" if floor_level > 0 else f"B{abs(floor_level)}"
 
-            segments.append({
-                "sequence_order": i,
-                "start_point": {
-                    "x": float(start[0]),
-                    "y": float(start[1]),
-                    "z": float(start[2])
+            floor_paths.append({
+                "floor_level": floor_level,
+                "floor_name": floor_name,
+                "segments": segments,
+                "bounds": {
+                    "min_x": min(all_x), "max_x": max(all_x),
+                    "min_y": min(all_y), "max_y": max(all_y),
                 },
-                "end_point": {
-                    "x": float(end[0]),
-                    "y": float(end[1]),
-                    "z": float(end[2])
-                },
-                "length": length
+                "total_distance": floor_distance,
             })
+    else:
+        # 기존 pose 모드: smoothed_floors의 순차 좌표를 segments로 변환
+        for floor_level, positions in smoothed_floors.items():
+            positions = np.array(positions)
 
-        # 경계 계산
-        bounds = {
-            "min_x": float(positions[:, 0].min()),
-            "max_x": float(positions[:, 0].max()),
-            "min_y": float(positions[:, 1].min()),
-            "max_y": float(positions[:, 1].max())
-        }
+            if len(positions) < 2:
+                continue
 
-        floor_distance = sum(s["length"] for s in segments)
+            segments = []
 
-        # 층 이름 생성 (음수면 지하)
-        if floor_level >= 0:
-            floor_name = f"{floor_level}층" if floor_level > 0 else "1층"
-        else:
-            floor_name = f"B{abs(floor_level)}"
+            for i in range(len(positions) - 1):
+                start = positions[i]
+                end = positions[i + 1]
+                length = float(np.linalg.norm(end - start))
+                total_distance += length
 
-        floor_paths.append({
-            "floor_level": floor_level,
-            "floor_name": floor_name,
-            "segments": segments,
-            "bounds": bounds,
+                segments.append({
+                    "sequence_order": i,
+                    "start_point": {
+                        "x": float(start[0]),
+                        "y": float(start[1]),
+                        "z": float(start[2])
+                    },
+                    "end_point": {
+                        "x": float(end[0]),
+                        "y": float(end[1]),
+                        "z": float(end[2])
+                    },
+                    "length": length
+                })
+
+            # 경계 계산
+            bounds = {
+                "min_x": float(positions[:, 0].min()),
+                "max_x": float(positions[:, 0].max()),
+                "min_y": float(positions[:, 1].min()),
+                "max_y": float(positions[:, 1].max())
+            }
+
+            floor_distance = sum(s["length"] for s in segments)
+
+            # 층 이름 생성 (음수면 지하)
+            if floor_level >= 0:
+                floor_name = f"{floor_level}층" if floor_level > 0 else "1층"
+            else:
+                floor_name = f"B{abs(floor_level)}"
+
+            floor_paths.append({
+                "floor_level": floor_level,
+                "floor_name": floor_name,
+                "segments": segments,
+                "bounds": bounds,
             "total_distance": floor_distance
         })
 
