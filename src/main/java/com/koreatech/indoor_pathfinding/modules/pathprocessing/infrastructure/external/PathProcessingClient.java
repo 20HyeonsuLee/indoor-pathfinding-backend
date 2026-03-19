@@ -26,6 +26,9 @@ public class PathProcessingClient {
     public PathProcessingClient(@Value("${path-service.base-url:http://localhost:8000}") String baseUrl) {
         this.webClient = WebClient.builder()
             .baseUrl(baseUrl)
+            .codecs(configurer -> configurer
+                .defaultCodecs()
+                .maxInMemorySize(16 * 1024 * 1024))  // 16MB
             .build();
     }
 
