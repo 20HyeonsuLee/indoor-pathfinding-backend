@@ -70,26 +70,15 @@ public class GraphBuilder {
         }
 
         List<PathSegment> segments = floorPath.getSegments();
-        PathNode previousEndNode = null;
 
         for (PathSegment segment : segments) {
             Point3D startPoint = segment.getStartPoint();
             Point3D endPoint = segment.getEndPoint();
 
-            // Get or create nodes for start and end points
             PathNode startNode = getOrCreateNode(floor, startPoint, nodeCache);
             PathNode endNode = getOrCreateNode(floor, endPoint, nodeCache);
 
-            // Create edge between start and end
             createEdge(startNode, endNode, EdgeType.HORIZONTAL, segment);
-
-            // Connect to previous segment's end node if coordinates match
-            if (previousEndNode != null && !previousEndNode.getId().equals(startNode.getId())) {
-                // If they're different nodes but segment order is sequential, connect them
-                createEdge(previousEndNode, startNode, EdgeType.HORIZONTAL, null);
-            }
-
-            previousEndNode = endNode;
         }
     }
 
