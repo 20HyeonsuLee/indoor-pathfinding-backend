@@ -1,37 +1,1023 @@
 """
 포인트클라우드 기반 그래프 생성 모듈
 
-pointcloud_pipeline의 함수들을 사용하여 그래프를 생성하고,
-기존 path_service의 노드/엣지 포맷으로 변환한다.
-
-[기존 pose 기반과의 차이]
-- 포인트클라우드 → 2D 점유격자 → 스켈레톤 → 그래프
-- 복도 중심선을 자동으로 찾아 노드를 배치
-- 벽 구조를 반영한 정확한 경로 생성
+포인트클라우드 → 2D 점유격자 → 스켈레톤 → 그래프를 생성하고,
+path_service의 노드/엣지 포맷으로 변환한다.
 """
-import sys
-import os
 import uuid
+
+import sqlite3
+import struct
+import os
 import numpy as np
+from scipy.ndimage import gaussian_filter1d, binary_dilation, binary_erosion, label
+from scipy.ndimage import distance_transform_edt
+from collections import deque
 
-# pointcloud_pipeline 모듈 경로 추가
-_rtab_root = os.path.join(os.path.dirname(__file__), '..', '..')
-sys.path.insert(0, _rtab_root)
 
-from pointcloud_pipeline.run import (
-    extract_pointcloud,
-    separate_floors_by_z,
-    create_occupancy_grid,
-    extract_walkable_area,
-    skeletonize,
-    remove_spurs,
-    skeleton_to_graph,
-    detect_hubs,
-    find_corridor_entries,
-    create_hub_edges,
-    CELL_SIZE,
-)
+CELL_SIZE = 0.15  # 점유 격자 해상도 (미터/셀)
 
+
+# =============================================================================
+# Step 1: DB에서 3D 포인트 클라우드 추출
+# =============================================================================
+
+def extract_pointcloud(db_path):
+    """
+    RTAB-Map DB에서 Feature 테이블의 3D 좌표를 추출하고
+    Node의 pose로 월드 좌표계로 변환한다.
+
+    Feature.depth_x/y/z는 카메라 로컬 좌표이므로:
+      world_point = R @ local_point + t
+    여기서 R = pose[:, :3] (3x3 회전), t = pose[:, 3] (3x1 이동)
+    """
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+
+    # 모든 노드의 pose 로드
+    cursor.execute('SELECT id, pose FROM Node ORDER BY id')
+    poses = {}
+    cam_positions = []
+    for node_id, pose_blob in cursor.fetchall():
+        if pose_blob and len(pose_blob) == 48:
+            matrix = np.array(struct.unpack('12f', pose_blob)).reshape(3, 4)
+            if np.isfinite(matrix).all() and not np.allclose(matrix, 0):
+                poses[node_id] = matrix
+                cam_positions.append(matrix[:, 3])
+
+    cam_positions = np.array(cam_positions)
+
+    # --- 소스 1: Feature 3D 좌표 (시각 특징점, 희소) ---
+    cursor.execute(
+        'SELECT node_id, depth_x, depth_y, depth_z '
+        'FROM Feature WHERE depth_x != 0 AND depth_y != 0 AND depth_z != 0'
+    )
+
+    world_points = []
+    for node_id, dx, dy, dz in cursor.fetchall():
+        if node_id not in poses:
+            continue
+        matrix = poses[node_id]
+        local = np.array([dx, dy, dz])
+        world = matrix[:, :3] @ local + matrix[:, 3]
+        if np.isfinite(world).all():
+            world_points.append(world)
+
+    feature_count = len(world_points)
+
+    # --- 소스 2: Data.scan (zlib 압축된 4채널 포인트, 더 밀집) ---
+    import zlib
+    cursor.execute(
+        'SELECT d.id, d.scan, d.scan_info, n.pose '
+        'FROM Data d JOIN Node n ON d.id = n.id '
+        'WHERE d.scan IS NOT NULL AND LENGTH(d.scan) > 50'
+    )
+
+    scan_count = 0
+    for nid, scan_blob, scan_info_blob, pose_blob in cursor.fetchall():
+        if not pose_blob or len(pose_blob) != 48:
+            continue
+        pose = np.array(struct.unpack('12f', pose_blob)).reshape(3, 4)
+        if not np.isfinite(pose).all() or np.allclose(pose, 0):
+            continue
+
+        # scan_info에서 local transform 추출 (센서→카메라 좌표 변환)
+        local_tf = np.eye(3, 4)
+        if scan_info_blob and len(scan_info_blob) >= 72:
+            lt = np.array(struct.unpack_from('12f', scan_info_blob, 24)).reshape(3, 4)
+            if np.isfinite(lt).all():
+                local_tf = lt
+
+        try:
+            decompressed = zlib.decompress(scan_blob)
+            n_pts = len(decompressed) // 16  # 4채널 × 4바이트
+            if n_pts < 1:
+                continue
+            pts = np.frombuffer(decompressed, dtype=np.float32).reshape(-1, 4)[:, :3]
+
+            for p in pts:
+                # scan local → camera local → world
+                p_cam = local_tf[:, :3] @ p + local_tf[:, 3]
+                p_world = pose[:, :3] @ p_cam + pose[:, 3]
+                if np.isfinite(p_world).all():
+                    world_points.append(p_world)
+                    scan_count += 1
+        except (zlib.error, ValueError):
+            continue
+
+    conn.close()
+
+    print(f"  Feature 포인트: {feature_count}개")
+    print(f"  Scan 포인트: {scan_count}개")
+
+    world_points = np.array(world_points)
+    print(f"  포인트 클라우드: {len(world_points)}개")
+    print(f"  카메라 궤적: {len(cam_positions)}개")
+    print(f"  X: {world_points[:, 0].min():.1f} ~ {world_points[:, 0].max():.1f}m")
+    print(f"  Y: {world_points[:, 1].min():.1f} ~ {world_points[:, 1].max():.1f}m")
+    print(f"  Z: {world_points[:, 2].min():.1f} ~ {world_points[:, 2].max():.1f}m")
+
+    return world_points, cam_positions
+
+
+# =============================================================================
+# Step 2: 층 분리
+# =============================================================================
+
+def separate_floors_by_z(points, cam_positions, floor_height=3.0):
+    """
+    카메라 궤적 Z 기반으로 층을 분리하고, 포인트클라우드를 층별 Z 범위로 슬라이싱한다.
+
+    [기존 문제]
+    포인트클라우드 전체 Z로 히스토그램을 만들면 벽/천장 포인트가 섞여서
+    층 피크가 하나로 뭉친다.
+
+    [개선]
+    카메라 궤적 Z는 사람이 걸은 높이이므로 층 구분이 명확하다.
+    1. 카메라 Z로 층 피크 탐지
+    2. 층별 Z 경계 산출 (인접 피크의 중간점)
+    3. 포인트클라우드를 Z 경계로 슬라이싱
+    """
+    # ─── 카메라 궤적 Z로 층 피크 탐지 ───
+    cam_z = cam_positions[:, 2]
+    z_min, z_max = cam_z.min(), cam_z.max()
+
+    bin_size = 0.3
+    num_bins = max(int((z_max - z_min) / bin_size), 10)
+    hist, bin_edges = np.histogram(cam_z, bins=num_bins)
+    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+    smoothed = gaussian_filter1d(hist.astype(float), sigma=0.8)
+
+    min_count = max(len(cam_z) * 0.03, 3)
+    min_peak_dist = floor_height * 0.7
+
+    significant = smoothed >= min_count
+    groups = []
+    in_group = False
+    for i in range(len(significant)):
+        if significant[i] and not in_group:
+            group_start = i
+            in_group = True
+        elif not significant[i] and in_group:
+            groups.append((group_start, i))
+            in_group = False
+    if in_group:
+        groups.append((group_start, len(significant)))
+
+    peaks = []
+    for gs, ge in groups:
+        region_centers = bin_centers[gs:ge]
+        region_weights = smoothed[gs:ge]
+        if region_weights.sum() < min_count:
+            continue
+        peak_z = float(np.average(region_centers, weights=region_weights))
+        if all(abs(peak_z - p) >= min_peak_dist for p in peaks):
+            peaks.append(peak_z)
+
+    if not peaks:
+        peaks = [float(np.median(cam_z))]
+
+    peaks.sort()
+    print(f"  카메라 Z 피크: {[f'{p:.1f}m' for p in peaks]}")
+
+    # ─── 층별 Z 경계 산출 ───
+    # 인접 피크의 중간점이 경계
+    z_boundaries = []
+    for i in range(len(peaks) - 1):
+        z_boundaries.append((peaks[i] + peaks[i + 1]) / 2)
+
+    # ─── 카메라 궤적 층 할당 ───
+    peaks_arr = np.array(peaks)
+    cam_floors = np.argmin(np.abs(cam_z[:, None] - peaks_arr[None, :]), axis=1)
+
+    # ─── 포인트클라우드를 층별 Z 범위로 슬라이싱 ───
+    # 각 층의 Z 범위: 카메라 피크 ± (층고/2 + 여유)
+    # 다층이면 경계 사용, 단층이면 피크 ± 마진
+    z_margin = floor_height * 0.6  # 카메라 위아래로 벽/바닥 포함
+    point_z = points[:, 2]
+
+    floors = {}
+    for fi in range(len(peaks)):
+        # Z 범위 결정
+        if len(peaks) == 1:
+            z_lo = peaks[fi] - z_margin
+            z_hi = peaks[fi] + z_margin
+        else:
+            z_lo = z_boundaries[fi - 1] if fi > 0 else peaks[fi] - z_margin
+            z_hi = z_boundaries[fi] if fi < len(peaks) - 1 else peaks[fi] + z_margin
+
+        point_mask = (point_z >= z_lo) & (point_z <= z_hi)
+        cam_mask = cam_floors == fi
+
+        if point_mask.sum() < 50:
+            continue
+
+        floors[fi] = {
+            'points': points[point_mask],
+            'cam_positions': cam_positions[cam_mask] if cam_mask.sum() > 0 else np.empty((0, 3)),
+            'z_peak': peaks[fi],
+            'z_range': (z_lo, z_hi),
+            'point_count': int(point_mask.sum()),
+            'cam_count': int(cam_mask.sum()),
+        }
+        print(f"  {fi+1}층 (z={peaks[fi]:.1f}m, range={z_lo:.1f}~{z_hi:.1f}): "
+              f"포인트 {point_mask.sum()}개, 궤적 {cam_mask.sum()}개")
+
+    return floors, peaks
+
+
+# =============================================================================
+# Step 3: 2D 점유 격자 생성
+# =============================================================================
+
+def create_occupancy_grid(floor_data, cell_size=CELL_SIZE):
+    """
+    3D 포인트를 XY 평면에 투영하여 2D 점유 격자를 생성한다.
+
+    각 셀의 상태:
+      0 = UNKNOWN (데이터 없음)
+      1 = OCCUPIED (포인트 존재 = 벽/장애물)
+      2 = FREE (카메라가 지나감 = 통행 가능)
+    """
+    points = floor_data['points']
+    cam_pos = floor_data['cam_positions']
+
+    # 모든 포인트의 XY 범위 (마진 추가)
+    all_xy = points[:, :2]
+    if len(cam_pos) > 0:
+        all_xy = np.vstack([all_xy, cam_pos[:, :2]])
+
+    x_min, y_min = all_xy.min(axis=0) - 1.0
+    x_max, y_max = all_xy.max(axis=0) + 1.0
+
+    # 격자 크기
+    width = int(np.ceil((x_max - x_min) / cell_size))
+    height = int(np.ceil((y_max - y_min) / cell_size))
+    grid = np.zeros((height, width), dtype=np.uint8)  # 0 = UNKNOWN
+
+    # 포인트 → OCCUPIED (1)
+    px = ((points[:, 0] - x_min) / cell_size).astype(int)
+    py = ((points[:, 1] - y_min) / cell_size).astype(int)
+    valid = (px >= 0) & (px < width) & (py >= 0) & (py < height)
+    grid[py[valid], px[valid]] = 1
+
+    # 카메라 궤적 → FREE (2)
+    # 카메라 위치 주변 반경(~1m)도 통행 가능으로 마킹
+    if len(cam_pos) > 0:
+        cx = ((cam_pos[:, 0] - x_min) / cell_size).astype(int)
+        cy = ((cam_pos[:, 1] - y_min) / cell_size).astype(int)
+        radius = int(0.8 / cell_size)  # 카메라 주변 0.8m
+
+        for i in range(len(cx)):
+            if 0 <= cx[i] < width and 0 <= cy[i] < height:
+                # 원형 영역을 FREE로 마킹
+                for dy in range(-radius, radius + 1):
+                    for dx in range(-radius, radius + 1):
+                        if dx*dx + dy*dy <= radius*radius:
+                            ny, nx = cy[i] + dy, cx[i] + dx
+                            if 0 <= ny < height and 0 <= nx < width:
+                                grid[ny, nx] = 2  # FREE가 OCCUPIED를 덮어씀
+
+    return grid, x_min, y_min, width, height
+
+
+# =============================================================================
+# Step 4: 통행 가능 영역 정제
+# =============================================================================
+
+def extract_walkable_area(grid):
+    """
+    점유 격자에서 통행 가능 영역을 정제한다.
+
+    1. FREE(2) 영역을 시드로 사용
+    2. UNKNOWN(0) 중 FREE와 연결된 영역도 통행 가능으로 확장
+    3. OCCUPIED(1)로 둘러싸인 UNKNOWN은 제외
+    4. 모폴로지 연산(닫기)으로 작은 구멍 메우기
+    """
+    # FREE 영역 = 카메라가 지나간 곳
+    walkable = (grid == 2).astype(np.uint8)
+
+    # 팽창으로 카메라 주변 확장 (벽 가까이도 통행 가능)
+    struct = np.ones((3, 3), dtype=bool)
+    walkable = binary_dilation(walkable, structure=struct, iterations=2).astype(np.uint8)
+
+    # OCCUPIED 영역은 통행 불가로 되돌리기
+    walkable[grid == 1] = 0
+
+    # 작은 구멍 메우기 (모폴로지 닫기)
+    walkable = binary_dilation(walkable, iterations=1).astype(np.uint8)
+    walkable = binary_erosion(walkable, iterations=1).astype(np.uint8)
+
+    return walkable
+
+
+# =============================================================================
+# Step 5: 스켈레톤화 (Thinning)
+# =============================================================================
+
+def skeletonize(binary_image):
+    """
+    Zhang-Suen thinning 알고리즘으로 이진 이미지를 1픽셀 폭의
+    스켈레톤(중심선)으로 축소한다.
+
+    넓은 복도(10픽셀 폭)이든 좁은 복도(3픽셀 폭)이든
+    중심선 1개만 남긴다.
+    """
+    img = binary_image.copy().astype(np.uint8)
+    rows, cols = img.shape
+    changed = True
+
+    while changed:
+        changed = False
+
+        # Sub-iteration 1
+        markers = np.zeros_like(img)
+        for i in range(1, rows - 1):
+            for j in range(1, cols - 1):
+                if img[i, j] == 0:
+                    continue
+                # 8-이웃
+                p2, p3, p4 = img[i-1, j], img[i-1, j+1], img[i, j+1]
+                p5, p6, p7 = img[i+1, j+1], img[i+1, j], img[i+1, j-1]
+                p8, p9 = img[i, j-1], img[i-1, j-1]
+                neighbors = [p2, p3, p4, p5, p6, p7, p8, p9]
+
+                # 조건 A: 이웃 수 2~6
+                n_count = sum(neighbors)
+                if not (2 <= n_count <= 6):
+                    continue
+
+                # 조건 B: 0→1 전환 수 = 1
+                transitions = 0
+                for k in range(8):
+                    if neighbors[k] == 0 and neighbors[(k+1) % 8] == 1:
+                        transitions += 1
+                if transitions != 1:
+                    continue
+
+                # 조건 C & D (sub-iteration 1)
+                if p2 * p4 * p6 != 0:
+                    continue
+                if p4 * p6 * p8 != 0:
+                    continue
+
+                markers[i, j] = 1
+
+        img[markers == 1] = 0
+        if markers.sum() > 0:
+            changed = True
+
+        # Sub-iteration 2
+        markers = np.zeros_like(img)
+        for i in range(1, rows - 1):
+            for j in range(1, cols - 1):
+                if img[i, j] == 0:
+                    continue
+                p2, p3, p4 = img[i-1, j], img[i-1, j+1], img[i, j+1]
+                p5, p6, p7 = img[i+1, j+1], img[i+1, j], img[i+1, j-1]
+                p8, p9 = img[i, j-1], img[i-1, j-1]
+                neighbors = [p2, p3, p4, p5, p6, p7, p8, p9]
+
+                n_count = sum(neighbors)
+                if not (2 <= n_count <= 6):
+                    continue
+
+                transitions = 0
+                for k in range(8):
+                    if neighbors[k] == 0 and neighbors[(k+1) % 8] == 1:
+                        transitions += 1
+                if transitions != 1:
+                    continue
+
+                if p2 * p4 * p8 != 0:
+                    continue
+                if p2 * p6 * p8 != 0:
+                    continue
+
+                markers[i, j] = 1
+
+        img[markers == 1] = 0
+        if markers.sum() > 0:
+            changed = True
+
+    return img
+
+
+SPUR_MIN_LENGTH = 3.0  # 이 길이(미터) 미만인 가지는 제거
+
+
+def remove_spurs(skeleton, cell_size=CELL_SIZE, min_length=SPUR_MIN_LENGTH):
+    """
+    스켈레톤에서 짧은 가지(spur)를 제거한다.
+
+    끝점에서 시작해 분기점까지의 경로 길이가 min_length 미만이면
+    해당 가지를 삭제한다. 반복 적용하여 연쇄 spur도 처리.
+    """
+    img = skeleton.copy()
+    rows, cols = img.shape
+    min_px = int(min_length / cell_size)
+
+    changed = True
+    while changed:
+        changed = False
+
+        # 이웃 수 계산
+        nc = np.zeros_like(img, dtype=int)
+        for i in range(1, rows - 1):
+            for j in range(1, cols - 1):
+                if img[i, j] == 0:
+                    continue
+                count = 0
+                for di in [-1, 0, 1]:
+                    for dj in [-1, 0, 1]:
+                        if di == 0 and dj == 0:
+                            continue
+                        if img[i + di, j + dj] > 0:
+                            count += 1
+                nc[i, j] = count
+
+        # 끝점(이웃=1)에서 분기점(이웃>=3)까지 추적
+        endpoints = list(zip(*np.where(nc == 1)))
+
+        for ey, ex in endpoints:
+            # 끝점에서 경로 추적
+            path = [(ey, ex)]
+            ci, cj = ey, ex
+            prev_i, prev_j = -1, -1
+
+            while True:
+                next_found = False
+                for di in [-1, 0, 1]:
+                    for dj in [-1, 0, 1]:
+                        if di == 0 and dj == 0:
+                            continue
+                        ni, nj = ci + di, cj + dj
+                        if ni == prev_i and nj == prev_j:
+                            continue
+                        if 0 <= ni < rows and 0 <= nj < cols and img[ni, nj] > 0:
+                            prev_i, prev_j = ci, cj
+                            ci, cj = ni, nj
+                            path.append((ci, cj))
+                            next_found = True
+                            break
+                    if next_found:
+                        break
+
+                if not next_found:
+                    break
+
+                # 분기점 도달
+                if nc[ci, cj] >= 3:
+                    break
+
+                if len(path) > min_px:
+                    break
+
+            # 분기점에 도달했고 길이가 짧으면 제거
+            if len(path) <= min_px and nc[ci, cj] >= 3:
+                # 분기점 자체는 남기고, 그 전까지 삭제
+                for py, px in path[:-1]:
+                    img[py, px] = 0
+                changed = True
+
+    return img
+
+
+# =============================================================================
+# Step 6: 스켈레톤에서 그래프 추출
+# =============================================================================
+
+WAYPOINT_INTERVAL = 1.5  # 중간 노드 배치 간격 (미터)
+SMOOTH_WINDOW = 11       # 경로 스무딩 윈도우 크기
+
+
+def _smooth_path_pixels(path, window=SMOOTH_WINDOW):
+    """픽셀 경로에 이동 평균 스무딩을 적용한다."""
+    if len(path) <= window:
+        return path
+
+    arr = np.array(path, dtype=float)
+    smoothed = np.copy(arr)
+    half = window // 2
+
+    for i in range(half, len(arr) - half):
+        smoothed[i] = np.mean(arr[i - half:i + half + 1], axis=0)
+
+    # 시작점/끝점은 원본 유지 (노드 위치 보존)
+    smoothed[0] = arr[0]
+    smoothed[-1] = arr[-1]
+
+    return [(int(round(y)), int(round(x))) for y, x in smoothed]
+
+
+def skeleton_to_graph(skeleton, x_min, y_min, cell_size, z_height):
+    """
+    스켈레톤 이미지에서 노드와 엣지를 추출한다.
+
+    - 분기점 (이웃 3개+) = JUNCTION
+    - 끝점 (이웃 1개) = ENDPOINT
+    - 경로 위 일정 간격마다 = WAYPOINT (최단경로 정밀도 확보)
+    - 경로는 이동 평균으로 스무딩 (지그재그 제거)
+    """
+    rows, cols = skeleton.shape
+
+    # 각 스켈레톤 픽셀의 이웃 수 계산
+    neighbor_count = np.zeros_like(skeleton, dtype=int)
+    for i in range(1, rows - 1):
+        for j in range(1, cols - 1):
+            if skeleton[i, j] == 0:
+                continue
+            count = 0
+            for di in [-1, 0, 1]:
+                for dj in [-1, 0, 1]:
+                    if di == 0 and dj == 0:
+                        continue
+                    if skeleton[i + di, j + dj] > 0:
+                        count += 1
+            neighbor_count[i, j] = count
+
+    # 키 노드 추출: 끝점(이웃=1) 또는 분기점(이웃≥3)
+    key_node_set = set()
+    for i in range(1, rows - 1):
+        for j in range(1, cols - 1):
+            if skeleton[i, j] == 0:
+                continue
+            nc = neighbor_count[i, j]
+            if nc == 1 or nc >= 3:
+                key_node_set.add((i, j))
+
+    # 키 노드 사이의 경로를 추적하고 스무딩 + 중간 노드 배치
+    nodes = []
+    node_map = {}  # (y, x) → node_index
+    edges = []
+    visited_edges = set()  # (start_grid, end_grid) 중복 방지
+
+    def _get_or_create_node(grid_pos, node_type):
+        if grid_pos in node_map:
+            return node_map[grid_pos]
+        i, j = grid_pos
+        node_idx = len(nodes)
+        nodes.append({
+            'id': node_idx,
+            'x': float(x_min + j * cell_size),
+            'y': float(y_min + i * cell_size),
+            'z': float(z_height),
+            'type': node_type,
+            'grid_pos': grid_pos,
+        })
+        node_map[grid_pos] = node_idx
+        return node_idx
+
+    # 키 노드 먼저 등록
+    for pos in key_node_set:
+        nc = neighbor_count[pos[0], pos[1]]
+        _get_or_create_node(pos, 'ENDPOINT' if nc == 1 else 'JUNCTION')
+
+    waypoint_interval_px = max(1, int(WAYPOINT_INTERVAL / cell_size))
+
+    # 각 키 노드에서 경로 추적
+    for start_pos in list(key_node_set):
+        si, sj = start_pos
+
+        for di in [-1, 0, 1]:
+            for dj in [-1, 0, 1]:
+                if di == 0 and dj == 0:
+                    continue
+                ni, nj = si + di, sj + dj
+                if not (0 <= ni < rows and 0 <= nj < cols):
+                    continue
+                if skeleton[ni, nj] == 0:
+                    continue
+
+                # 경로 픽셀을 모두 기록하며 다음 키 노드까지 추적
+                path = [start_pos, (ni, nj)]
+                ci, cj = ni, nj
+                prev_i, prev_j = si, sj
+                found_end = None
+
+                while True:
+                    if (ci, cj) in key_node_set and (ci, cj) != start_pos:
+                        found_end = (ci, cj)
+                        break
+
+                    next_found = False
+                    for d2i in [-1, 0, 1]:
+                        for d2j in [-1, 0, 1]:
+                            if d2i == 0 and d2j == 0:
+                                continue
+                            n2i, n2j = ci + d2i, cj + d2j
+                            if n2i == prev_i and n2j == prev_j:
+                                continue
+                            if 0 <= n2i < rows and 0 <= n2j < cols and skeleton[n2i, n2j] > 0:
+                                prev_i, prev_j = ci, cj
+                                ci, cj = n2i, n2j
+                                path.append((ci, cj))
+                                next_found = True
+                                break
+                        if next_found:
+                            break
+
+                    if not next_found:
+                        break
+                    if len(path) > rows * cols:
+                        break
+
+                if found_end is None:
+                    continue
+
+                edge_key = tuple(sorted([start_pos, found_end]))
+                if edge_key in visited_edges:
+                    continue
+                visited_edges.add(edge_key)
+
+                # 경로 스무딩
+                smoothed = _smooth_path_pixels(path)
+
+                # 스무딩된 경로 위에 일정 간격으로 WAYPOINT 배치
+                chain_node_ids = [node_map[start_pos]]
+                accumulated = 0
+
+                for k in range(1, len(smoothed)):
+                    py, px = smoothed[k - 1]
+                    cy, cx = smoothed[k]
+                    step_dist = np.sqrt((cy - py)**2 + (cx - px)**2)
+                    accumulated += step_dist
+
+                    if accumulated >= waypoint_interval_px and smoothed[k] != found_end:
+                        wp_id = _get_or_create_node(smoothed[k], 'WAYPOINT')
+                        chain_node_ids.append(wp_id)
+                        accumulated = 0
+
+                chain_node_ids.append(node_map[found_end])
+
+                # 체인의 연속 노드를 엣지로 연결
+                for k in range(len(chain_node_ids) - 1):
+                    na = nodes[chain_node_ids[k]]
+                    nb = nodes[chain_node_ids[k + 1]]
+                    dist = np.sqrt((na['x'] - nb['x'])**2 + (na['y'] - nb['y'])**2)
+                    edges.append({
+                        'from': chain_node_ids[k],
+                        'to': chain_node_ids[k + 1],
+                        'distance': float(dist),
+                    })
+
+    return nodes, edges
+
+
+# =============================================================================
+# Step 7: 허브(로비) 감지 + 완전 그래프 생성
+# =============================================================================
+
+# 열린 공간 감지 임계값 (미터)
+# 벽까지 거리가 이 값 이상인 영역을 "허브(로비)"로 판정
+HUB_MIN_RADIUS = 2.0
+
+# 허브 최소 면적 (제곱미터)
+# 이 면적 미만인 열린 공간은 허브가 아닌 넓은 복도로 무시
+HUB_MIN_AREA = 10.0
+
+# 복도 진입점 탐지 시 허브 경계 확장 범위 (픽셀)
+ENTRY_SEARCH_RADIUS = 3
+
+
+def detect_hubs(walkable, cell_size=CELL_SIZE, grid=None):
+    """
+    통행 가능 영역에서 허브(로비, 홀 등 넓은 열린 공간)를 감지한다.
+
+    [알고리즘]
+    1. Distance Transform: 각 통행 가능 셀에서 가장 가까운 벽까지의 거리 계산
+       - 복도: 거리 1~2m (좁음)
+       - 로비: 거리 3~10m (넓음)
+
+    2. 임계값 적용: 거리 > HUB_MIN_RADIUS인 셀 = 허브 후보
+
+    3. 연결 영역 분석: 허브 후보 셀의 연결 영역(label)을 구함
+       - 각 연결 영역 = 하나의 허브
+
+    4. 면적 필터: HUB_MIN_AREA 이상인 영역만 허브로 확정
+
+    Args:
+        walkable: 이진 통행 가능 영역 (1=통행가능, 0=벽)
+        cell_size: 격자 해상도 (미터/셀)
+        grid: 원본 점유 격자 (OCCUPIED=1 셀 참조용, 없으면 walkable 반전 사용)
+
+    Returns:
+        hubs: 허브 정보 리스트
+        dist: distance transform 맵
+    """
+    # Step 1: Distance Transform
+    # 핵심: walkable 반전이 아니라 OCCUPIED(벽) 셀까지 거리를 측정해야 한다.
+    # walkable 반전을 쓰면 UNKNOWN 영역 경계도 "벽"으로 취급되어
+    # 로비 내부에서도 거리가 작게 나온다.
+    if grid is not None:
+        # 벽(OCCUPIED=1)이 아닌 곳 = True, 벽인 곳 = False
+        not_wall = (grid != 1).astype(np.uint8)
+        # 통행 가능 영역 내에서 가장 가까운 벽까지 거리
+        dist = distance_transform_edt(not_wall) * cell_size
+        # walkable 영역 밖은 0으로 마스킹
+        dist[walkable == 0] = 0
+    else:
+        dist = distance_transform_edt(walkable) * cell_size
+
+    # Step 2: 허브 후보 마스크
+    hub_threshold_px = HUB_MIN_RADIUS  # 이미 미터 단위
+    hub_mask = (dist >= hub_threshold_px).astype(np.uint8)
+
+    # Step 3: 연결 영역 분석
+    labeled, n_labels = label(hub_mask)
+
+    # Step 4: 각 영역 분석 및 면적 필터
+    hubs = []
+    for label_id in range(1, n_labels + 1):
+        region_mask = (labeled == label_id)
+        area_cells = region_mask.sum()
+        area_m2 = area_cells * cell_size * cell_size
+
+        if area_m2 < HUB_MIN_AREA:
+            continue
+
+        # 중심 좌표 (무게중심)
+        ys, xs = np.where(region_mask)
+        center_y = int(np.mean(ys))
+        center_x = int(np.mean(xs))
+
+        # 최대 벽 거리
+        max_radius = float(dist[region_mask].max())
+
+        hubs.append({
+            'mask': region_mask,
+            'area_m2': area_m2,
+            'center': (center_y, center_x),
+            'max_radius': max_radius,
+            'label_id': label_id,
+        })
+
+    return hubs, dist
+
+
+def find_corridor_entries(hub, walkable, skeleton, cell_size=CELL_SIZE):
+    """
+    허브 경계에서 복도가 진입하는 지점을 찾는다.
+
+    [알고리즘]
+    1. 허브 마스크를 약간 팽창시켜 경계 영역 생성
+    2. 경계 영역 내에서 스켈레톤 픽셀을 찾음
+       = 복도 중심선이 허브와 만나는 지점 = 진입점
+    3. 가까운 진입점끼리 병합 (같은 복도의 중복 감지 방지)
+
+    Args:
+        hub: 허브 정보 딕셔너리 (detect_hubs의 출력)
+        walkable: 통행 가능 영역
+        skeleton: 스켈레톤 이미지
+        cell_size: 격자 해상도
+
+    Returns:
+        entries: 진입점 리스트
+            - 'grid_pos': (y, x) 격자 좌표
+            - 'direction': 진입 방향 벡터 (허브 중심 → 진입점)
+    """
+    hub_mask = hub['mask']
+    center_y, center_x = hub['center']
+
+    # Step 1: 허브 경계 영역 = 팽창 - 원본
+    # 허브 바로 바깥 테두리에서 스켈레톤을 찾기 위함
+    dilated = binary_dilation(hub_mask, iterations=ENTRY_SEARCH_RADIUS).astype(np.uint8)
+    border = dilated.astype(int) - hub_mask.astype(int)
+    border = np.clip(border, 0, 1).astype(np.uint8)
+
+    # Step 2: 경계에서 스켈레톤과 겹치는 픽셀 = 진입점 후보
+    entry_mask = (border > 0) & (skeleton > 0)
+    entry_positions = list(zip(*np.where(entry_mask)))
+
+    if not entry_positions:
+        # 스켈레톤이 허브 내부를 통과하는 경우:
+        # 허브 내부에서 스켈레톤 끝점/분기점을 진입점으로 사용
+        inner_skel = (hub_mask > 0) & (skeleton > 0)
+        entry_positions = list(zip(*np.where(inner_skel)))
+
+    if not entry_positions:
+        return []
+
+    # Step 3: 가까운 진입점 병합 (같은 복도가 여러 픽셀에서 감지되는 것 방지)
+    merge_radius = int(1.5 / cell_size)  # 1.5m 이내는 같은 진입점
+    merged = _merge_nearby_points(entry_positions, merge_radius)
+
+    # 진입 방향 계산: 허브 중심 → 진입점 벡터
+    entries = []
+    for y, x in merged:
+        dy = y - center_y
+        dx = x - center_x
+        length = np.sqrt(dy*dy + dx*dx)
+        if length > 0:
+            direction = (dy / length, dx / length)
+        else:
+            direction = (0, 0)
+
+        entries.append({
+            'grid_pos': (y, x),
+            'direction': direction,
+        })
+
+    return entries
+
+
+def _merge_nearby_points(points, radius):
+    """
+    반경 내의 가까운 점들을 하나로 병합한다 (무게중심 사용).
+
+    Args:
+        points: (y, x) 좌표 리스트
+        radius: 병합 반경 (픽셀)
+
+    Returns:
+        병합된 좌표 리스트
+    """
+    if not points:
+        return []
+
+    points = list(points)
+    merged = []
+    used = set()
+
+    for i, (y1, x1) in enumerate(points):
+        if i in used:
+            continue
+
+        # i와 가까운 점들 수집
+        group_y = [y1]
+        group_x = [x1]
+        used.add(i)
+
+        for j, (y2, x2) in enumerate(points):
+            if j in used:
+                continue
+            if abs(y1 - y2) <= radius and abs(x1 - x2) <= radius:
+                dist = np.sqrt((y1 - y2)**2 + (x1 - x2)**2)
+                if dist <= radius:
+                    group_y.append(y2)
+                    group_x.append(x2)
+                    used.add(j)
+
+        # 그룹의 무게중심
+        merged.append((int(np.mean(group_y)), int(np.mean(group_x))))
+
+    return merged
+
+
+def create_hub_edges(hubs, entries_per_hub, existing_nodes, existing_edges,
+                     x_min, y_min, cell_size, z_height):
+    """
+    각 허브에 대해 진입점들 사이의 완전 그래프 엣지를 생성한다.
+
+    [핵심 로직]
+    허브에 N개 복도가 연결되어 있으면, N×(N-1)/2개의 엣지를 생성한다.
+    각 엣지의 거리 = 두 진입점 간 유클리드 거리 (로비 내부는 직선 이동 가능).
+
+    예: 허브에 3개 복도(A, B, C) 연결
+      → 엣지: A↔B, A↔C, B↔C (3개)
+      → 길찾기 시 A→C를 직접 이동 가능 (A→중심→C 불필요)
+
+    [기존 노드 재활용]
+    진입점과 가장 가까운 기존 노드를 찾아서 연결한다.
+    새 노드를 만들지 않고 기존 그래프 위에 엣지만 추가한다.
+
+    Args:
+        hubs: 허브 리스트
+        entries_per_hub: 허브별 진입점 리스트
+        existing_nodes: 기존 그래프 노드
+        existing_edges: 기존 그래프 엣지 (수정됨)
+        x_min, y_min: 격자 원점
+        cell_size: 격자 해상도
+        z_height: 이 층의 Z 높이
+
+    Returns:
+        new_nodes: 새로 생성된 노드 (기존에 가까운 노드가 없을 때)
+        new_edges: 새로 생성된 허브 엣지
+        hub_info: 시각화용 허브 정보
+    """
+    new_nodes = []
+    new_edges = []
+    hub_info = []  # 시각화용
+
+    # 기존 노드의 격자 좌표 목록 (가까운 노드 탐색용)
+    node_grid_positions = []
+    for n in existing_nodes:
+        if 'grid_pos' in n:
+            node_grid_positions.append(n['grid_pos'])
+        else:
+            # 월드 좌표 → 격자 좌표 역변환
+            gx = int((n['x'] - x_min) / cell_size)
+            gy = int((n['y'] - y_min) / cell_size)
+            node_grid_positions.append((gy, gx))
+
+    max_existing_id = max((n['id'] for n in existing_nodes), default=-1)
+    next_id = max_existing_id + 1
+
+    for hub_idx, (hub, entries) in enumerate(zip(hubs, entries_per_hub)):
+        if len(entries) < 2:
+            continue
+
+        center_y, center_x = hub['center']
+        center_wx = x_min + center_x * cell_size
+        center_wy = y_min + center_y * cell_size
+
+        # 각 진입점을 기존 노드에 매핑하거나 새 노드 생성
+        entry_node_ids = []
+        for entry in entries:
+            ey, ex = entry['grid_pos']
+
+            # 가장 가까운 기존 노드 찾기 (5픽셀 = 0.75m 이내)
+            best_dist = float('inf')
+            best_node_id = None
+            search_radius = int(2.0 / cell_size)
+
+            for node in existing_nodes:
+                if 'grid_pos' not in node:
+                    continue
+                ny, nx = node['grid_pos']
+                dist = np.sqrt((ey - ny)**2 + (ex - nx)**2)
+                if dist < best_dist and dist <= search_radius:
+                    best_dist = dist
+                    best_node_id = node['id']
+
+            if best_node_id is not None:
+                entry_node_ids.append(best_node_id)
+            else:
+                # 가까운 노드 없음 → 새 HUB_ENTRY 노드 생성
+                wx = x_min + ex * cell_size
+                wy = y_min + ey * cell_size
+                new_node = {
+                    'id': next_id,
+                    'x': float(wx),
+                    'y': float(wy),
+                    'z': float(z_height),
+                    'type': 'HUB_ENTRY',
+                    'grid_pos': (ey, ex),
+                }
+                new_nodes.append(new_node)
+                existing_nodes.append(new_node)  # 이후 탐색에서도 사용
+                entry_node_ids.append(next_id)
+                next_id += 1
+
+        # 완전 그래프 엣지 생성: 모든 진입점 쌍을 연결
+        # N개 진입점 → N×(N-1)/2 엣지
+        node_by_id = {n['id']: n for n in existing_nodes + new_nodes}
+        hub_edge_count = 0
+
+        for i in range(len(entry_node_ids)):
+            for j in range(i + 1, len(entry_node_ids)):
+                nid_a = entry_node_ids[i]
+                nid_b = entry_node_ids[j]
+
+                # 같은 노드면 스킵
+                if nid_a == nid_b:
+                    continue
+
+                # 이미 엣지가 있으면 스킵
+                edge_key = tuple(sorted([nid_a, nid_b]))
+                already_exists = any(
+                    tuple(sorted([e['from'], e['to']])) == edge_key
+                    for e in existing_edges + new_edges
+                )
+                if already_exists:
+                    continue
+
+                # 거리 = 두 노드 간 유클리드 거리
+                na = node_by_id[nid_a]
+                nb = node_by_id[nid_b]
+                dist = np.sqrt(
+                    (na['x'] - nb['x'])**2 +
+                    (na['y'] - nb['y'])**2
+                )
+
+                new_edges.append({
+                    'from': nid_a,
+                    'to': nid_b,
+                    'distance': float(dist),
+                    'type': 'HUB',  # 허브 내부 엣지 표시
+                })
+                hub_edge_count += 1
+
+        hub_info.append({
+            'center': (center_wx, center_wy, z_height),
+            'area_m2': hub['area_m2'],
+            'max_radius': hub['max_radius'],
+            'n_entries': len(entries),
+            'n_edges': hub_edge_count,
+            'entry_positions': [(x_min + e['grid_pos'][1] * cell_size,
+                                y_min + e['grid_pos'][0] * cell_size)
+                               for e in entries],
+        })
+
+    return new_nodes, new_edges, hub_info
+
+
+# =============================================================================
+
+
+# =============================================================================
+# 파이프라인 실행 + 포맷 변환
+# =============================================================================
 
 def build_pointcloud_graph(db_path):
     """
@@ -40,43 +1026,30 @@ def build_pointcloud_graph(db_path):
 
     Returns:
         floor_graphs: {층번호: (nodes_dict, edges_dict)}
-        floors_data: 시각화용 층별 데이터
+        floors_data: 층별 데이터
         peaks: 층별 Z 피크
         world_points: 전체 포인트클라우드
         cam_positions: 카메라 궤적
     """
-    # Step 1: 포인트클라우드 추출
     world_points, cam_positions = extract_pointcloud(db_path)
-
-    # Step 2: 층 분리
     floors, peaks = separate_floors_by_z(world_points, cam_positions)
 
-    # Step 3~6: 층별 처리
     floor_graphs = {}
     node_id_offset = 0
 
     for fi, fdata in sorted(floors.items()):
-        # 점유 격자
         grid, x_min, y_min, w, h = create_occupancy_grid(fdata, CELL_SIZE)
-
-        # 통행 가능 영역
         walkable = extract_walkable_area(grid)
-
-        # 스켈레톤화 + spur 제거
         skel = skeletonize(walkable)
         skel = remove_spurs(skel, CELL_SIZE)
-
-        # 그래프 추출
         nodes, edges = skeleton_to_graph(skel, x_min, y_min, CELL_SIZE, peaks[fi])
 
-        # ID 오프셋 적용
         for n in nodes:
             n['id'] += node_id_offset
         for e in edges:
             e['from'] += node_id_offset
             e['to'] += node_id_offset
 
-        # 허브 감지
         hubs, dist_map = detect_hubs(walkable, CELL_SIZE, grid=grid)
         if hubs:
             entries_per_hub = [
@@ -90,18 +1063,15 @@ def build_pointcloud_graph(db_path):
             nodes.extend(hub_nodes)
             edges.extend(hub_edges)
 
-        # 시각화 데이터 저장
         fdata['grid'] = grid
         fdata['walkable'] = walkable
         fdata['skeleton'] = skel
         fdata['nodes'] = nodes
         fdata['edges'] = edges
 
-        # 기존 포맷으로 변환
         floor_level = fi + 1
         nodes_dict = _convert_nodes(nodes, floor_level)
         edges_dict = _convert_edges(edges, nodes_dict)
-
         floor_graphs[floor_level] = (nodes_dict, edges_dict)
         node_id_offset += len(nodes)
 
@@ -109,20 +1079,14 @@ def build_pointcloud_graph(db_path):
 
 
 def _convert_nodes(pc_nodes, floor_level):
-    """pointcloud_pipeline 노드를 path_service 포맷으로 변환"""
-    id_map = {}
+    """pointcloud 노드를 path_service 포맷으로 변환"""
     result = []
-
     for n in pc_nodes:
-        node_id = str(uuid.uuid4())
-        id_map[n['id']] = node_id
-
         node_type = n.get('type', 'WAYPOINT')
         if node_type == 'HUB_ENTRY':
             node_type = 'JUNCTION'
-
         result.append({
-            'id': node_id,
+            'id': str(uuid.uuid4()),
             'x': n['x'],
             'y': n['y'],
             'z': n['z'],
@@ -132,34 +1096,25 @@ def _convert_nodes(pc_nodes, floor_level):
             'metadata': {},
             '_pc_id': n['id'],
         })
-
     return result
 
 
 def _convert_edges(pc_edges, nodes_dict):
-    """pointcloud_pipeline 엣지를 path_service 포맷으로 변환"""
-    # pc_id → uuid 매핑
+    """pointcloud 엣지를 path_service 포맷으로 변환"""
     id_map = {n['_pc_id']: n['id'] for n in nodes_dict}
-
     result = []
     for e in pc_edges:
         from_id = id_map.get(e['from'])
         to_id = id_map.get(e['to'])
         if not from_id or not to_id:
             continue
-
-        edge_type = 'HORIZONTAL'
-        if e.get('type') == 'HUB':
-            edge_type = 'HORIZONTAL'
-
         result.append({
             'id': str(uuid.uuid4()),
             'from_node_id': from_id,
             'to_node_id': to_id,
             'distance': e['distance'],
             'is_bidirectional': True,
-            'edge_type': edge_type,
+            'edge_type': 'HORIZONTAL',
             'metadata': {},
         })
-
     return result
