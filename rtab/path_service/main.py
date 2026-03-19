@@ -54,11 +54,9 @@ import numpy as np
 
 # 서비스 모듈 임포트
 from services.extraction import extract_trajectory_from_db, get_trajectory_stats
-from services.deduplication import deduplicate_path, merge_overlapping_segments
-from services.smoothing import remove_outliers, smooth_path_gapaware
-from services.path_flattening import snap_to_lines
 from services.vertical_detector import detect_stairs_first, separate_floors, assign_floors_to_stairs
-from services.junction_detection import build_path_graph, get_graph_stats, merge_floor_graphs
+from services.junction_detection import get_graph_stats, merge_floor_graphs
+from services.pointcloud_graph import build_pointcloud_graph
 
 
 # =============================================================================
@@ -349,16 +347,13 @@ async def start_processing(file_id: str, background_tasks: BackgroundTasks):
 
 async def process_path_async(job_id: str, file_path: str):
     """
-    경로 처리 메인 파이프라인 (백그라운드 태스크)
+    경로 처리 파이프라인 (백그라운드 태스크)
 
     [처리 단계]
-    1. 궤적 추출 (10%)
-    2. 수직 통로 감지 (25%)
-    3. 층 분리 (35%)
-    4. 중복 제거 (50%)
-    5. RDP + 직선 스냅 (65%)
-    6. 그래프 구축 (85%)
-    7. 결과 생성 (100%)
+    1. 궤적 추출 + 수직통로 감지 + 층 분리 (35%)
+    2. 포인트클라우드 기반 2D 평면도 → 그래프 구축 (70%)
+    3. 층 간 그래프 병합 (85%)
+    4. 결과 생성 (100%)
 
     Args:
         job_id: 작업 ID
@@ -378,26 +373,9 @@ async def process_path_async(job_id: str, file_path: str):
             extract_trajectory_from_db, file_path
         )
 
-        # 기본 통계
         trajectory_stats = get_trajectory_stats(raw_positions)
         job.progress = 10
         job.message = f"궤적 추출 완료: {len(raw_positions)}개 포인트"
-
-        # ─────────────────────────────────────────────────────────────────
-        # Step 1.5: XY축 스무딩 (계단 감지 전, Z축 보존)
-        # ─────────────────────────────────────────────────────────────────
-        job.progress = 12
-        job.message = "XY 노이즈 제거 중..."
-
-        def _smooth_xy_only(positions: np.ndarray) -> np.ndarray:
-            """Z축을 보존하면서 XY만 가우시안 스무딩"""
-            from services.smoothing import smooth_path
-            smoothed = smooth_path(positions, sigma=1.5)
-            # Z축은 원본 유지 (계단 감지 보호)
-            smoothed[:, 2] = positions[:, 2]
-            return smoothed
-
-        xy_smoothed = await asyncio.to_thread(_smooth_xy_only, raw_positions)
 
         # ─────────────────────────────────────────────────────────────────
         # Step 2: 수직 통로 감지 (25%)
@@ -405,14 +383,12 @@ async def process_path_async(job_id: str, file_path: str):
         job.progress = 15
         job.message = "계단/엘리베이터 감지 중..."
 
-        # 원본 Z값을 사용하여 계단 감지 (XY 스무딩된 좌표로)
         vertical_passages, stair_mask = await asyncio.to_thread(
-            detect_stairs_first, xy_smoothed
+            detect_stairs_first, raw_positions
         )
 
         job.progress = 25
-        passage_count = len(vertical_passages)
-        job.message = f"수직 통로 {passage_count}개 감지"
+        job.message = f"수직 통로 {len(vertical_passages)}개 감지"
 
         # ─────────────────────────────────────────────────────────────────
         # Step 3: 층 분리 (35%)
@@ -421,96 +397,50 @@ async def process_path_async(job_id: str, file_path: str):
         job.message = "층 분리 중..."
 
         floors_data = await asyncio.to_thread(
-            separate_floors, xy_smoothed, node_ids, stair_mask=stair_mask
+            separate_floors, raw_positions, node_ids,
+            stair_mask=stair_mask, vertical_passages=vertical_passages
         )
 
-        # 수직 통로에 층 정보 할당
         vertical_passages = assign_floors_to_stairs(vertical_passages, floors_data)
 
-        # 층 분리 결과 검증
-        if not floors_data:
-            # 계단만 있고 평면 포인트가 없는 경우: 전체를 단일 층으로 처리
-            floors_data = {1: {
-                'positions': xy_smoothed[~stair_mask] if stair_mask.any() else xy_smoothed,
-                'node_ids': [nid for nid, m in zip(node_ids, stair_mask) if not m] if stair_mask.any() else node_ids,
-                'indices': np.where(~stair_mask)[0] if stair_mask.any() else np.arange(len(xy_smoothed)),
-                'z_mean': float(np.mean(xy_smoothed[:, 2])),
-                'z_min': float(xy_smoothed[:, 2].min()),
-                'z_max': float(xy_smoothed[:, 2].max()),
-                'point_count': int((~stair_mask).sum()) if stair_mask.any() else len(xy_smoothed)
-            }}
-
         job.progress = 35
-        floor_count = len(floors_data)
-        job.message = f"{floor_count}개 층 분리 완료"
+        job.message = f"{len(floors_data)}개 층 분리 완료"
 
         # ─────────────────────────────────────────────────────────────────
-        # Step 4: 중복 제거 (50%)
+        # Step 4: 포인트클라우드 기반 그래프 구축 (70%)
         # ─────────────────────────────────────────────────────────────────
         job.progress = 40
-        job.message = "중복 경로 제거 중..."
+        job.message = "포인트클라우드에서 2D 평면도 생성 중..."
 
-        deduplicated_floors = {}
-        for floor_level, floor_data in floors_data.items():
-            positions = floor_data['positions']
+        floor_graphs, pc_floors, peaks, world_points, cam_positions = \
+            await asyncio.to_thread(build_pointcloud_graph, file_path)
 
-            # 포인트 부족 시 스킵
-            if len(positions) < 3:
-                deduplicated_floors[floor_level] = positions
-                continue
-
-            # 층별 가우시안 스무딩 (중복 제거 전에 적용하여 정확도 향상)
-            # 같은 층 내에서는 Z축 스무딩도 안전
-            smoothed = await asyncio.to_thread(
-                smooth_path_gapaware, positions, sigma=1.5, gap_threshold=5.0
-            )
-            # 왕복 구간 병합
-            merged = await asyncio.to_thread(
-                merge_overlapping_segments, smoothed, overlap_threshold=1.0
-            )
-            # 공간적 중복 제거
-            deduplicated = await asyncio.to_thread(
-                deduplicate_path, merged, distance_threshold=0.5
-            )
-            deduplicated_floors[floor_level] = deduplicated
-
-        job.progress = 50
-        job.message = "중복 제거 완료"
+        job.progress = 70
+        total_n = sum(len(n) for n, _ in floor_graphs.values())
+        job.message = f"그래프 구축 완료: 노드 {total_n}개"
 
         # ─────────────────────────────────────────────────────────────────
-        # Step 5: RDP + 직선 스냅 (65%)
-        # ─────────────────────────────────────────────────────────────────
-        # RDP로 핵심 꼭짓점을 추출하고, 꼭짓점 사이를 직선으로 연결합니다.
-        job.progress = 55
-        job.message = "경로 직선화 중 (RDP + 직선 스냅)..."
-
-        smoothed_floors = {}
-        for floor_level, positions in deduplicated_floors.items():
-            snapped = await asyncio.to_thread(
-                snap_to_lines, positions, epsilon=0.5, point_spacing=0.5
-            )
-            smoothed_floors[floor_level] = snapped
-
-        job.progress = 65
-        job.message = "직선화 완료"
-
-        # ─────────────────────────────────────────────────────────────────
-        # Step 7: 그래프 구축 (85%)
+        # Step 5: 층 간 그래프 병합 (85%)
         # ─────────────────────────────────────────────────────────────────
         job.progress = 75
-        job.message = "경로 그래프 구축 중..."
+        job.message = "층 간 그래프 병합 중..."
 
-        floor_graphs = {}
-        for floor_level, positions in smoothed_floors.items():
-            nodes, edges = await asyncio.to_thread(
-                build_path_graph, positions, floor_level
-            )
-            floor_graphs[floor_level] = (nodes, edges)
-
-        # 층 간 그래프 병합
         all_nodes, all_edges = merge_floor_graphs(floor_graphs, vertical_passages)
 
         graph_stats = get_graph_stats(all_nodes, all_edges)
+
+        # smoothed_floors 생성 (결과 빌더 호환)
+        smoothed_floors = {}
+        for fi, fdata in sorted(pc_floors.items()):
+            floor_level = fi + 1
+            cam_pos = fdata.get('cam_positions', np.empty((0, 3)))
+            if len(cam_pos) > 0:
+                smoothed_floors[floor_level] = cam_pos
+        for floor_level, (nodes, _) in floor_graphs.items():
+            if floor_level not in smoothed_floors and nodes:
+                smoothed_floors[floor_level] = np.array(
+                    [[n['x'], n['y'], n['z']] for n in nodes]
+                )
 
         job.progress = 85
         job.message = f"그래프 구축 완료: 노드 {len(all_nodes)}개, 엣지 {len(all_edges)}개"

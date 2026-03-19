@@ -67,6 +67,9 @@ MIN_POINTS_PER_FLOOR = 10      # 층당 최소 포인트 수
 # 갈림길 병합 파라미터
 GAP_THRESHOLD = 10             # 계단 구간 병합 거리 (포인트 수)
 
+# 계단 경계 포인트 수 (층 분리 시 계단 시작/끝 N개를 층 포인트로 포함)
+STAIR_BOUNDARY_POINTS = 3
+
 
 # =============================================================================
 # 수직 통로 감지 (계단/엘리베이터)
@@ -160,7 +163,7 @@ def detect_stairs_first(
                 # 해당 윈도우를 수직 이동으로 표시
                 changing_z[i:i + current_window + 1] = True
 
-    # Step 2: 연속된 수직 이동 구간을 그룹화
+    # Step 2: 연속된 수직 이동 구간을 그룹화 (방향 전환점에서 분리)
     stair_segments = []
     i = 0
 
@@ -173,36 +176,42 @@ def detect_stairs_first(
                 i += 1
             end_idx = i
 
-            # 구간 분석
-            segment_positions = positions[start_idx:end_idx]
-            z_start = segment_positions[0, 2]
-            z_end = segment_positions[-1, 2]
-            z_disp = abs(z_end - z_start)
+            # 방향 전환점에서 서브 구간 분리
+            # (올라갔다 내려오는 왕복 계단을 각각 독립적으로 감지)
+            sub_segments = _split_at_direction_reversal(
+                positions, start_idx, end_idx, min_reversal_z=min_total_z_change * 0.5
+            )
 
-            # 최소 조건 만족 확인
-            if z_disp >= min_total_z_change and (end_idx - start_idx) >= min_stair_points:
-                # XY 이동 거리 계산 (직선 거리가 아닌 경로 거리)
-                xy_diffs = np.diff(segment_positions[:, :2], axis=0)
-                total_xy_dist = np.sum(np.sqrt(np.sum(xy_diffs**2, axis=1)))
+            for sub_start, sub_end in sub_segments:
+                segment_positions = positions[sub_start:sub_end]
+                z_start_val = segment_positions[0, 2]
+                z_end_val = segment_positions[-1, 2]
+                z_disp = abs(z_end_val - z_start_val)
 
-                # XY/Z 비율로 계단/엘리베이터 판정
-                xy_z_ratio = total_xy_dist / z_disp if z_disp > 0 else float('inf')
-                passage_type = "ELEVATOR" if xy_z_ratio < ELEVATOR_XY_Z_RATIO else "STAIRCASE"
+                # 최소 조건 만족 확인
+                if z_disp >= min_total_z_change and (sub_end - sub_start) >= min_stair_points:
+                    # XY 이동 거리 계산 (직선 거리가 아닌 경로 거리)
+                    xy_diffs = np.diff(segment_positions[:, :2], axis=0)
+                    total_xy_dist = np.sum(np.sqrt(np.sum(xy_diffs**2, axis=1)))
 
-                stair_segments.append({
-                    'type': passage_type,
-                    'start_idx': start_idx,
-                    'end_idx': end_idx,
-                    'positions': segment_positions.copy(),
-                    'z_start': float(z_start),
-                    'z_end': float(z_end),
-                    'z_displacement': float(z_disp),
-                    'xy_z_ratio': float(xy_z_ratio),
-                    'direction': 'UP' if z_end > z_start else 'DOWN'
-                })
+                    # XY/Z 비율로 계단/엘리베이터 판정
+                    xy_z_ratio = total_xy_dist / z_disp if z_disp > 0 else float('inf')
+                    passage_type = "ELEVATOR" if xy_z_ratio < ELEVATOR_XY_Z_RATIO else "STAIRCASE"
 
-                # 마스크 업데이트
-                is_stair[start_idx:end_idx] = True
+                    stair_segments.append({
+                        'type': passage_type,
+                        'start_idx': sub_start,
+                        'end_idx': sub_end,
+                        'positions': segment_positions.copy(),
+                        'z_start': float(z_start_val),
+                        'z_end': float(z_end_val),
+                        'z_displacement': float(z_disp),
+                        'xy_z_ratio': float(xy_z_ratio),
+                        'direction': 'UP' if z_end_val > z_start_val else 'DOWN'
+                    })
+
+                    # 마스크 업데이트
+                    is_stair[sub_start:sub_end] = True
         else:
             i += 1
 
@@ -210,6 +219,73 @@ def detect_stairs_first(
     stair_segments = _merge_stair_segments(stair_segments, positions)
 
     return stair_segments, is_stair
+
+
+def _split_at_direction_reversal(
+    positions: np.ndarray,
+    start_idx: int,
+    end_idx: int,
+    min_reversal_z: float = 0.75
+) -> List[Tuple[int, int]]:
+    """
+    수직 이동 구간에서 Z 방향 전환점을 찾아 서브 구간으로 분리합니다.
+
+    [문제 상황]
+    올라갔다 내려오는 왕복 계단은 순수 Z 변위가 0에 가까워
+    하나의 구간으로 처리하면 감지에 실패합니다.
+
+        Z값:  ──╱╲──   ← 왕복하면 z_disp ≈ 0
+              분리 →  ──╱ + ╲──  ← 각각 z_disp > 0
+
+    [알고리즘]
+    1. Z값의 스무딩된 누적 방향을 추적
+    2. Z 극값(최고점/최저점)을 찾아 방향 전환점 판정
+    3. 전환점에서 구간을 분리
+
+    Args:
+        positions: 전체 좌표 배열
+        start_idx: 구간 시작 인덱스
+        end_idx: 구간 끝 인덱스
+        min_reversal_z: 방향 전환으로 인정할 최소 Z 변화량
+
+    Returns:
+        (시작, 끝) 인덱스 튜플의 리스트
+    """
+    if end_idx - start_idx < 4:
+        return [(start_idx, end_idx)]
+
+    z = positions[start_idx:end_idx, 2]
+
+    # 스무딩하여 노이즈 제거 (짧은 구간용 작은 sigma)
+    if len(z) > 5:
+        z_smooth = gaussian_filter1d(z, sigma=2.0)
+    else:
+        z_smooth = z
+
+    # Z 극값 찾기 (방향 전환점)
+    split_points = [0]  # 시작점
+
+    for i in range(1, len(z_smooth) - 1):
+        is_peak = z_smooth[i] > z_smooth[i - 1] and z_smooth[i] > z_smooth[i + 1]
+        is_valley = z_smooth[i] < z_smooth[i - 1] and z_smooth[i] < z_smooth[i + 1]
+
+        if is_peak or is_valley:
+            # 이전 분리점에서 충분한 Z 변화가 있는지 확인
+            last_split_z = z_smooth[split_points[-1]]
+            if abs(z_smooth[i] - last_split_z) >= min_reversal_z:
+                split_points.append(i)
+
+    split_points.append(len(z) - 1)  # 끝점
+
+    # 서브 구간 생성 (절대 인덱스로 변환)
+    sub_segments = []
+    for j in range(len(split_points) - 1):
+        sub_start = start_idx + split_points[j]
+        sub_end = start_idx + split_points[j + 1] + 1
+        if sub_end - sub_start >= 3:
+            sub_segments.append((sub_start, sub_end))
+
+    return sub_segments if sub_segments else [(start_idx, end_idx)]
 
 
 def _merge_stair_segments(
@@ -274,15 +350,17 @@ def separate_floors(
     node_ids: List[int],
     height_threshold: float = DEFAULT_FLOOR_HEIGHT,
     min_points_per_floor: int = MIN_POINTS_PER_FLOOR,
-    stair_mask: Optional[np.ndarray] = None
+    stair_mask: Optional[np.ndarray] = None,
+    vertical_passages: Optional[List[Dict]] = None
 ) -> Dict[int, Dict]:
     """
     궤적을 층별로 분리합니다.
 
     [분리 알고리즘]
-    1. 수직 통로 구간 제외 (stair_mask 사용)
-    2. Z값 히스토그램 분석으로 층 높이 클러스터링
-    3. 각 포인트를 가장 가까운 층에 할당
+    1. 수직 통로 구간 제외 (경계 포인트는 층 포인트로 유지)
+    2. 계단 감지 결과에서 층 높이 힌트 추출
+    3. Z값 히스토그램 분석 + 힌트로 층 높이 클러스터링
+    4. 각 포인트를 가장 가까운 층에 할당
 
     [반환 데이터 구조]
     {
@@ -302,18 +380,30 @@ def separate_floors(
         height_threshold: 층 간 높이 (미터)
         min_points_per_floor: 층당 최소 포인트 수
         stair_mask: 수직 통로 제외 마스크 (True = 제외)
+        vertical_passages: 계단/엘리베이터 감지 결과 (층 높이 힌트용)
 
     Returns:
         층별 데이터 딕셔너리
 
     Examples:
-        >>> floors = separate_floors(positions, node_ids, stair_mask=stair_mask)
+        >>> floors = separate_floors(positions, node_ids, stair_mask=stair_mask,
+        ...                          vertical_passages=passages)
         >>> for level, data in floors.items():
         ...     print(f"{level}층: {data['point_count']}개 포인트, Z = {data['z_mean']:.2f}m")
     """
-    # Step 1: 수직 통로 제외
+    # Step 1: 수직 통로 제외 (경계 포인트는 층 포인트로 유지)
     if stair_mask is not None:
-        floor_mask = ~stair_mask
+        floor_mask = ~stair_mask.copy()
+
+        # 계단 경계 포인트를 층 포인트로 포함
+        # (계단 시작/끝 N개 포인트는 실제로 층에 있는 지점)
+        if vertical_passages:
+            for passage in vertical_passages:
+                start = passage['start_idx']
+                end = passage['end_idx']
+                floor_mask[start:min(start + STAIR_BOUNDARY_POINTS, end)] = True
+                floor_mask[max(end - STAIR_BOUNDARY_POINTS, start):end] = True
+
         floor_positions = positions[floor_mask]
         floor_node_ids = [node_ids[i] for i in range(len(node_ids)) if floor_mask[i]]
         original_indices = np.where(floor_mask)[0]
@@ -325,11 +415,14 @@ def separate_floors(
     if len(floor_positions) == 0:
         return {}
 
-    # Step 2: Z값 클러스터링으로 층 식별
-    z_values = floor_positions[:, 2]
-    floor_levels = _cluster_z_values(z_values, height_threshold)
+    # Step 2: 계단 감지 결과에서 층 높이 힌트 추출
+    z_hints = _extract_floor_hints(vertical_passages) if vertical_passages else []
 
-    # Step 3: 층별로 포인트 그룹화
+    # Step 3: Z값 클러스터링으로 층 식별
+    z_values = floor_positions[:, 2]
+    floor_levels = _cluster_z_values(z_values, height_threshold, z_hints=z_hints)
+
+    # Step 4: 층별로 포인트 그룹화
     floors = {}
     unique_levels = np.unique(floor_levels)
 
@@ -339,8 +432,9 @@ def separate_floors(
         mask = floor_levels == level
         level_positions = floor_positions[mask]
 
-        # 최소 포인트 수 확인
-        if len(level_positions) < min_points_per_floor:
+        # 힌트 기반 분리 시 최소 포인트 기준 완화 (경계 포인트만으로도 층 인정)
+        effective_min = STAIR_BOUNDARY_POINTS if z_hints else min_points_per_floor
+        if len(level_positions) < effective_min:
             continue
 
         level_node_ids = [floor_node_ids[i] for i in range(len(floor_node_ids)) if mask[i]]
@@ -366,28 +460,77 @@ def separate_floors(
     return floors
 
 
+def _extract_floor_hints(
+    vertical_passages: List[Dict]
+) -> List[float]:
+    """
+    계단/엘리베이터 구간의 시작/끝 Z값에서 층 높이 힌트를 추출합니다.
+
+    [알고리즘]
+    1. 모든 passage의 z_start, z_end 수집
+    2. 가까운 Z값끼리 클러스터링 (1.0m 이내 = 같은 층)
+    3. 각 클러스터의 평균 = 층 높이 힌트
+
+    Args:
+        vertical_passages: 감지된 수직 통로 리스트
+
+    Returns:
+        층 높이 힌트 리스트 (오름차순 정렬)
+    """
+    if not vertical_passages:
+        return []
+
+    z_endpoints = []
+    for passage in vertical_passages:
+        z_endpoints.append(passage['z_start'])
+        z_endpoints.append(passage['z_end'])
+
+    z_endpoints.sort()
+
+    # 가까운 Z값끼리 클러스터링
+    clusters = [[z_endpoints[0]]]
+    for z in z_endpoints[1:]:
+        if abs(z - np.mean(clusters[-1])) < 1.0:
+            clusters[-1].append(z)
+        else:
+            clusters.append([z])
+
+    return sorted([float(np.mean(cluster)) for cluster in clusters])
+
+
 def _cluster_z_values(
     z_values: np.ndarray,
-    threshold: float
+    threshold: float,
+    z_hints: Optional[List[float]] = None
 ) -> np.ndarray:
     """
     Z값을 클러스터링하여 층 레벨을 할당합니다.
 
-    [알고리즘 - 히스토그램 기반]
-    1. Z값의 히스토그램 생성
-    2. 히스토그램 스무딩으로 노이즈 제거
-    3. 피크(봉우리) 찾기 = 각 층의 높이
-    4. 각 Z값을 가장 가까운 피크에 할당
+    [알고리즘 - 히스토그램 기반 + 계단 힌트]
+    1. 계단 힌트가 2개 이상이면 힌트를 피크로 사용
+    2. 그렇지 않으면 히스토그램 기반으로 피크 탐색
+    3. 각 Z값을 가장 가까운 피크에 할당
 
     Args:
         z_values: Z 좌표 배열
         threshold: 층 간 높이 (클러스터 분리 거리)
+        z_hints: 계단 감지에서 추출한 층 높이 힌트
 
     Returns:
         각 포인트의 층 레벨 배열
     """
     z_min, z_max = z_values.min(), z_values.max()
     z_range = z_max - z_min
+
+    # 계단 힌트가 2개 이상이면 히스토그램 대신 힌트 기반으로 분리
+    if z_hints and len(z_hints) >= 2:
+        peaks = sorted(z_hints)
+        peaks_array = np.array(peaks)
+        levels = np.zeros(len(z_values), dtype=int)
+        for i, z in enumerate(z_values):
+            distances = np.abs(peaks_array - z)
+            levels[i] = np.argmin(distances)
+        return levels
 
     # 단일 층인 경우
     if z_range < threshold:

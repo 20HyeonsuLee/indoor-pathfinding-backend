@@ -69,7 +69,8 @@ def main():
     # Step 3: Separate floors (excluding stair points)
     print("\n[3/6] Separating floors (excluding stair points)...")
     try:
-        floors_data = separate_floors(positions, node_ids, stair_mask=stair_mask)
+        floors_data = separate_floors(positions, node_ids, stair_mask=stair_mask,
+                                       vertical_passages=stair_segments)
         print(f"  - Detected {len(floors_data)} floor(s)")
         for level, data in sorted(floors_data.items()):
             floor_name = f"{level}F" if level >= 0 else f"B{abs(level)}"

@@ -648,18 +648,21 @@ def find_dead_ends(nodes: List[Dict], edges: List[Dict]) -> List[Dict]:
 
 def merge_floor_graphs(
     floor_graphs: Dict[int, Tuple[List[Dict], List[Dict]]],
-    vertical_passages: List[Dict]
+    vertical_passages: List[Dict],
+    stair_node_spacing: float = NODE_SPACING
 ) -> Tuple[List[Dict], List[Dict]]:
     """
     여러 층의 그래프를 수직 통로로 연결하여 병합합니다.
 
     [처리 흐름]
     1. 모든 층의 노드와 엣지 수집
-    2. 수직 통로(계단/엘리베이터) 정보로 층 간 엣지 추가
+    2. 각 수직 통로의 중심선을 따라 stair_node_spacing 간격으로 노드 생성
+    3. 계단 노드를 체인으로 연결하고, 양 끝을 가장 가까운 층 노드에 연결
 
     Args:
         floor_graphs: {층번호: (노드리스트, 엣지리스트)} 딕셔너리
         vertical_passages: 수직 통로 정보 리스트
+        stair_node_spacing: 계단 노드 간격 (미터, 기본 1.0m)
 
     Returns:
         (전체 노드 리스트, 전체 엣지 리스트)
@@ -672,48 +675,149 @@ def merge_floor_graphs(
         all_nodes.extend(nodes)
         all_edges.extend(edges)
 
-    # 수직 통로로 층 간 연결
+    # 각 수직 통로에 대해 중심선 노드 생성 + 층 연결
     for passage in vertical_passages:
+        stair_nodes, stair_edges = _generate_stair_nodes(
+            passage, node_spacing=stair_node_spacing
+        )
+
+        if not stair_nodes:
+            continue
+
+        all_nodes.extend(stair_nodes)
+        all_edges.extend(stair_edges)
+
+        # 계단 입구 노드를 출발 층의 가장 가까운 노드에 연결
         from_floor = passage.get('from_floor')
         to_floor = passage.get('to_floor')
         passage_type = passage.get('type', 'STAIRCASE')
+        edge_type = f"VERTICAL_{passage_type}"
 
-        # 수직통로 데이터 검증
-        entry_point = passage.get('entry_point')
-        exit_point = passage.get('exit_point')
+        entry_pos = {
+            'x': stair_nodes[0]['x'],
+            'y': stair_nodes[0]['y'],
+            'z': stair_nodes[0]['z']
+        }
+        exit_pos = {
+            'x': stair_nodes[-1]['x'],
+            'y': stair_nodes[-1]['y'],
+            'z': stair_nodes[-1]['z']
+        }
 
-        if not entry_point or not exit_point:
-            continue
-        if not all(k in entry_point for k in ('x', 'y', 'z')):
-            continue
-        if not all(k in exit_point for k in ('x', 'y', 'z')):
-            continue
+        # 층 노드만 대상으로 가장 가까운 노드 찾기 (계단 노드 제외)
+        floor_only_nodes = [n for n in all_nodes
+                           if n.get('metadata', {}).get('passage_type') is None]
 
-        # 각 층의 가장 가까운 노드 찾기
-        entry_node = _find_nearest_node_to_position(
-            all_nodes,
-            entry_point,
-            floor_level=from_floor
+        entry_floor_node = _find_nearest_node_to_position(
+            floor_only_nodes, entry_pos, floor_level=from_floor
         )
-        exit_node = _find_nearest_node_to_position(
-            all_nodes,
-            exit_point,
-            floor_level=to_floor
+        exit_floor_node = _find_nearest_node_to_position(
+            floor_only_nodes, exit_pos, floor_level=to_floor
         )
 
-        if entry_node and exit_node:
-            # 수직 엣지 추가
-            edge_type = f"VERTICAL_{passage_type}"
+        if entry_floor_node:
+            dist = np.linalg.norm(np.array([
+                entry_floor_node['x'] - stair_nodes[0]['x'],
+                entry_floor_node['y'] - stair_nodes[0]['y'],
+                entry_floor_node['z'] - stair_nodes[0]['z']
+            ]))
             all_edges.append({
                 'id': str(uuid.uuid4()),
-                'from_node_id': entry_node['id'],
-                'to_node_id': exit_node['id'],
-                'distance': passage.get('z_displacement', 3.0),
+                'from_node_id': entry_floor_node['id'],
+                'to_node_id': stair_nodes[0]['id'],
+                'distance': float(dist),
+                'is_bidirectional': True,
+                'edge_type': edge_type
+            })
+
+        if exit_floor_node:
+            dist = np.linalg.norm(np.array([
+                exit_floor_node['x'] - stair_nodes[-1]['x'],
+                exit_floor_node['y'] - stair_nodes[-1]['y'],
+                exit_floor_node['z'] - stair_nodes[-1]['z']
+            ]))
+            all_edges.append({
+                'id': str(uuid.uuid4()),
+                'from_node_id': stair_nodes[-1]['id'],
+                'to_node_id': exit_floor_node['id'],
+                'distance': float(dist),
                 'is_bidirectional': True,
                 'edge_type': edge_type
             })
 
     return all_nodes, all_edges
+
+
+def _generate_stair_nodes(
+    passage: Dict,
+    node_spacing: float = NODE_SPACING
+) -> Tuple[List[Dict], List[Dict]]:
+    """
+    계단/엘리베이터의 시작점(ENTRY)과 끝점(EXIT)만 생성합니다.
+
+    중간 노드 없이 입구↔출구를 하나의 수직 엣지로 직접 연결한다.
+    XY는 계단 궤적의 중심선 양 끝을 사용한다.
+
+    Args:
+        passage: 수직 통로 정보 (positions 포함)
+        node_spacing: 미사용 (호환성 유지)
+
+    Returns:
+        (노드 딕셔너리 리스트 [entry, exit], 엣지 딕셔너리 리스트 [1개])
+    """
+    positions = np.array(passage.get('positions', []))
+    if len(positions) < 2:
+        return [], []
+
+    passage_type = passage.get('type', 'STAIRCASE')
+
+    # XY 중심선의 양 끝점 산출 (스무딩으로 노이즈 제거)
+    from scipy.ndimage import gaussian_filter1d
+    sigma = max(3.0, len(positions) * 0.15)
+    center_x = gaussian_filter1d(positions[:, 0], sigma=sigma)
+    center_y = gaussian_filter1d(positions[:, 1], sigma=sigma)
+
+    entry_node = {
+        'id': str(uuid.uuid4()),
+        'x': float(center_x[0]),
+        'y': float(center_y[0]),
+        'z': float(positions[0, 2]),
+        'type': NodeType.PASSAGE_ENTRY.value,
+        'original_index': -1,
+        'floor_level': None,
+        'metadata': {'passage_type': passage_type}
+    }
+    exit_node = {
+        'id': str(uuid.uuid4()),
+        'x': float(center_x[-1]),
+        'y': float(center_y[-1]),
+        'z': float(positions[-1, 2]),
+        'type': NodeType.PASSAGE_EXIT.value,
+        'original_index': -1,
+        'floor_level': None,
+        'metadata': {'passage_type': passage_type}
+    }
+
+    nodes = [entry_node, exit_node]
+
+    # 시작↔끝 단일 엣지
+    dist = np.linalg.norm(np.array([
+        exit_node['x'] - entry_node['x'],
+        exit_node['y'] - entry_node['y'],
+        exit_node['z'] - entry_node['z']
+    ]))
+    edge_type = f"VERTICAL_{passage_type}"
+    edges = [{
+        'id': str(uuid.uuid4()),
+        'from_node_id': entry_node['id'],
+        'to_node_id': exit_node['id'],
+        'distance': float(dist),
+        'is_bidirectional': True,
+        'edge_type': edge_type,
+        'metadata': {}
+    }]
+
+    return nodes, edges
 
 
 def _find_nearest_node_to_position(

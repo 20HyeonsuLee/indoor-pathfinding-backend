@@ -49,7 +49,7 @@ from services.deduplication import deduplicate_path, merge_overlapping_segments
 from services.path_flattening import snap_to_lines
 from services.junction_detection import build_path_graph, merge_floor_graphs
 
-DB_PATH = os.path.join(os.path.dirname(__file__), '..', 'db', 'school.db')
+DB_PATH = os.path.join(os.path.dirname(__file__), '..', 'db', 'hub.db')
 OUTPUT_DIR = os.path.join(os.path.dirname(__file__), '..', 'exported_images')
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -117,7 +117,8 @@ def run_pipeline():
     # 피크 = 각 층의 높이. 피크 간 최소 거리는 층고(3.0m)×0.7 = 2.1m.
     # 각 포인트를 가장 가까운 피크에 할당하여 층별로 분리한다.
     print("      층 분리...")
-    floors_data = separate_floors(smoothed, node_ids, stair_mask=stair_mask)
+    floors_data = separate_floors(smoothed, node_ids, stair_mask=stair_mask,
+                                   vertical_passages=vertical_passages)
     vertical_passages = assign_floors_to_stairs(vertical_passages, floors_data)
 
     # 층 분리 실패 시 폴백: 전체를 단일 층으로 처리
@@ -321,9 +322,11 @@ def visualize_3d(result):
 
     # 노드 타입별 시각 스타일
     type_styles = {
-        'ENDPOINT':  {'color': 'red',    's': 60, 'marker': 's', 'label': 'ENDPOINT'},
-        'JUNCTION':  {'color': 'orange', 's': 50, 'marker': 'D', 'label': 'JUNCTION'},
-        'WAYPOINT':  {'color': '#2196F3','s': 15, 'marker': 'o', 'label': 'WAYPOINT'},
+        'ENDPOINT':      {'color': 'red',    's': 60, 'marker': 's', 'label': 'ENDPOINT'},
+        'JUNCTION':      {'color': 'orange', 's': 50, 'marker': 'D', 'label': 'JUNCTION'},
+        'WAYPOINT':      {'color': '#2196F3','s': 15, 'marker': 'o', 'label': 'WAYPOINT'},
+        'PASSAGE_ENTRY': {'color': '#9C27B0','s': 50, 'marker': '^', 'label': 'STAIR_ENTRY'},
+        'PASSAGE_EXIT':  {'color': '#9C27B0','s': 50, 'marker': 'v', 'label': 'STAIR_EXIT'},
     }
 
     # 노드 플롯 (범례 중복 방지를 위해 타입별 첫 번째만 label 부여)
