@@ -25,6 +25,18 @@ public interface PathEdgeRepository extends JpaRepository<PathEdge, UUID> {
            "OR e.toNode.floor.id = :floorId")
     List<PathEdge> findByFloorId(@Param("floorId") UUID floorId);
 
+    @Query("SELECT e FROM PathEdge e JOIN FETCH e.fromNode JOIN FETCH e.toNode " +
+           "WHERE e.fromNode.floor.id = :floorId OR e.toNode.floor.id = :floorId")
+    List<PathEdge> findByFloorIdWithNodes(@Param("floorId") UUID floorId);
+
+    @Query("SELECT e FROM PathEdge e JOIN FETCH e.fromNode JOIN FETCH e.toNode WHERE e.fromNode.id = :nodeId OR e.toNode.id = :nodeId")
+    List<PathEdge> findAllByNodeId(@Param("nodeId") UUID nodeId);
+
+    @Query("SELECT e FROM PathEdge e WHERE " +
+           "(e.fromNode.id = :fromNodeId AND e.toNode.id = :toNodeId) OR " +
+           "(e.fromNode.id = :toNodeId AND e.toNode.id = :fromNodeId)")
+    List<PathEdge> findByNodePair(@Param("fromNodeId") UUID fromNodeId, @Param("toNodeId") UUID toNodeId);
+
     @Modifying
     @Query("DELETE FROM PathEdge e WHERE e.fromNode.floor.id = :floorId " +
            "OR e.toNode.floor.id = :floorId")

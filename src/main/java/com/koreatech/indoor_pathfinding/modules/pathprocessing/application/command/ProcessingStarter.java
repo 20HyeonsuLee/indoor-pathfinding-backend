@@ -41,6 +41,16 @@ public class ProcessingStarter {
 
         String fileId = pathProcessingClient.uploadFile(Paths.get(session.getFilePath()));
 
+        // PLY 추출 - 공유 볼륨의 파일 경로를 직접 전달 (재업로드 불필요)
+        try {
+            String absolutePath = Paths.get(session.getFilePath()).toAbsolutePath().toString();
+            String cacheKey = pathProcessingClient.extractPointcloudPly(absolutePath);
+            session.updatePlyFileId(cacheKey);
+            log.info("PLY extraction completed, cache_key: {}", cacheKey);
+        } catch (Exception e) {
+            log.warn("PLY extraction failed (non-critical): {}", e.getMessage());
+        }
+
         String jobId = pathProcessingClient.startProcessing(fileId);
 
         scanStatusUpdater.updateStatus(sessionId, ScanStatus.EXTRACTING);

@@ -50,6 +50,16 @@ public class PathNode extends BaseEntity {
     @Builder.Default
     private Boolean isPassageEntry = false;
 
+    public void updateCoordinates(Double x, Double y, Double z) {
+        this.x = x;
+        this.y = y;
+        this.z = z;
+    }
+
+    public void updateType(NodeType type) {
+        this.type = type;
+    }
+
     public void updatePoi(String poiName, PoiCategory poiCategory) {
         this.poiName = poiName;
         this.poiCategory = poiCategory;

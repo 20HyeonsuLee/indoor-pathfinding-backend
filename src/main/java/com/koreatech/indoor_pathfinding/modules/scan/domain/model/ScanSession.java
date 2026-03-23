@@ -47,8 +47,15 @@ public class ScanSession extends BaseEntity {
     @Column
     private Double totalDistance;
 
+    @Column(name = "ply_file_id")
+    private String plyFileId;
+
     public void updateStatus(ScanStatus status) {
         this.status = status;
+    }
+
+    public void updatePlyFileId(String plyFileId) {
+        this.plyFileId = plyFileId;
     }
 
     public void setErrorMessage(String errorMessage) {

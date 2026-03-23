@@ -8,6 +8,8 @@ import uuid
 
 import sqlite3
 import struct
+import subprocess
+import tempfile
 import os
 import numpy as np
 from scipy.ndimage import gaussian_filter1d, binary_dilation, binary_erosion, label
@@ -16,102 +18,186 @@ from collections import deque
 
 
 CELL_SIZE = 0.3   # 점유 격자 해상도 (미터/셀) — 크게 할수록 노드 줄어듦
+VOXEL_SIZE = 0.05  # rtabmap-export 복셀 크기 (미터)
+VISUALIZATION_VOXEL_SIZE = 0.2  # 시각화용 복셀 크기 (웹 전송용, 경량화)
 
 
 # =============================================================================
-# Step 1: DB에서 3D 포인트 클라우드 추출
+# Step 1: rtabmap-export CLI로 밀집 포인트 클라우드 추출
 # =============================================================================
 
-def extract_pointcloud(db_path):
+def _read_ply_binary(ply_path):
     """
-    RTAB-Map DB에서 Feature 테이블의 3D 좌표를 추출하고
-    Node의 pose로 월드 좌표계로 변환한다.
+    rtabmap-export가 생성한 binary PLY 파일에서 XYZ 좌표를 읽는다.
 
-    Feature.depth_x/y/z는 카메라 로컬 좌표이므로:
-      world_point = R @ local_point + t
-    여기서 R = pose[:, :3] (3x3 회전), t = pose[:, 3] (3x1 이동)
+    포맷: x,y,z (float32) + nx,ny,nz (float32) + r,g,b (uint8) + curvature (float32)
+    = 31 bytes per point
     """
+    with open(ply_path, 'rb') as f:
+        # 헤더 파싱
+        n_vertices = 0
+        while True:
+            line = f.readline().decode('ascii', errors='ignore').strip()
+            if line.startswith('element vertex'):
+                n_vertices = int(line.split()[-1])
+            if line == 'end_header':
+                break
+
+        if n_vertices == 0:
+            return np.empty((0, 3))
+
+        # 바이너리 데이터: 포인트당 31바이트 (xyz + normal + rgb + curvature)
+        point_dtype = np.dtype([
+            ('x', '<f4'), ('y', '<f4'), ('z', '<f4'),
+            ('nx', '<f4'), ('ny', '<f4'), ('nz', '<f4'),
+            ('r', 'u1'), ('g', 'u1'), ('b', 'u1'),
+            ('curvature', '<f4'),
+        ])
+        data = np.frombuffer(f.read(n_vertices * point_dtype.itemsize),
+                             dtype=point_dtype, count=n_vertices)
+
+    points = np.column_stack([data['x'], data['y'], data['z']])
+    return points
+
+
+def extract_visualization_ply(db_path, output_path, voxel_size=VISUALIZATION_VOXEL_SIZE):
+    """
+    웹 시각화용 경량 PLY 파일을 추출한다.
+
+    xyz + rgb만 포함하여 파일 크기를 최소화한다.
+    (법선, 곡률 제거 → 31 → 15 bytes/point)
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cmd = [
+            'rtabmap-export',
+            '--cloud',
+            '--voxel', str(voxel_size),
+            '--max_range', '5',
+            '--depth_confidence', '50',
+            '--decimation', '4',
+            '--output_dir', tmpdir,
+            '--output', 'cloud',
+            db_path,
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        if result.returncode != 0:
+            raise RuntimeError(f"rtabmap-export 실패:\n{result.stderr}")
+
+        source_ply = os.path.join(tmpdir, 'cloud_cloud.ply')
+        if not os.path.exists(source_ply):
+            raise FileNotFoundError("PLY 파일이 생성되지 않았습니다.")
+
+        _convert_ply_xyz_rgb(source_ply, output_path)
+
+    file_size = os.path.getsize(output_path)
+    print(f"  시각화 PLY 생성: {output_path}")
+    print(f"  파일 크기: {file_size / (1024 * 1024):.2f} MB")
+    return output_path
+
+
+def _convert_ply_xyz_rgb(source_ply, output_path):
+    """
+    rtabmap-export PLY(31 bytes/point)에서 xyz+rgb(15 bytes/point)만 추출하여 저장한다.
+    """
+    with open(source_ply, 'rb') as f:
+        n_vertices = 0
+        while True:
+            line = f.readline().decode('ascii', errors='ignore').strip()
+            if line.startswith('element vertex'):
+                n_vertices = int(line.split()[-1])
+            if line == 'end_header':
+                break
+
+        if n_vertices == 0:
+            raise ValueError("포인트클라우드에 정점이 없습니다.")
+
+        source_dtype = np.dtype([
+            ('x', '<f4'), ('y', '<f4'), ('z', '<f4'),
+            ('nx', '<f4'), ('ny', '<f4'), ('nz', '<f4'),
+            ('r', 'u1'), ('g', 'u1'), ('b', 'u1'),
+            ('curvature', '<f4'),
+        ])
+        data = np.frombuffer(f.read(n_vertices * source_dtype.itemsize),
+                             dtype=source_dtype, count=n_vertices)
+
+    header = (
+        "ply\n"
+        "format binary_little_endian 1.0\n"
+        f"element vertex {n_vertices}\n"
+        "property float x\n"
+        "property float y\n"
+        "property float z\n"
+        "property uchar red\n"
+        "property uchar green\n"
+        "property uchar blue\n"
+        "end_header\n"
+    )
+
+    output_dtype = np.dtype([
+        ('x', '<f4'), ('y', '<f4'), ('z', '<f4'),
+        ('r', 'u1'), ('g', 'u1'), ('b', 'u1'),
+    ])
+    output_data = np.empty(n_vertices, dtype=output_dtype)
+    output_data['x'] = data['x']
+    output_data['y'] = data['y']
+    output_data['z'] = data['z']
+    output_data['r'] = data['r']
+    output_data['g'] = data['g']
+    output_data['b'] = data['b']
+
+    with open(output_path, 'wb') as f:
+        f.write(header.encode('ascii'))
+        f.write(output_data.tobytes())
+
+    print(f"  PLY 변환: {n_vertices:,}개 포인트, "
+          f"{n_vertices * 31 / 1024 / 1024:.1f}MB → {n_vertices * 15 / 1024 / 1024:.1f}MB")
+
+
+def extract_pointcloud(db_path, voxel_size=VOXEL_SIZE):
+    """
+    rtabmap-export CLI로 DB에서 밀집 포인트 클라우드를 추출한다.
+
+    rtabmap-export가 SLAM 최적화, depth 역투영, confidence 필터,
+    복셀 다운샘플링을 모두 처리하므로 직접 파싱할 필요가 없다.
+
+    카메라 궤적은 DB에서 직접 읽는다.
+    """
+    # ── rtabmap-export로 PLY 생성 ──
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cmd = [
+            'rtabmap-export',
+            '--cloud',
+            '--voxel', str(voxel_size),
+            '--max_range', '5',
+            '--depth_confidence', '50',
+            '--decimation', '2',
+            '--output_dir', tmpdir,
+            '--output', 'cloud',
+            db_path,
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if result.returncode != 0:
+            raise RuntimeError(f"rtabmap-export 실패:\n{result.stderr}")
+
+        ply_path = os.path.join(tmpdir, 'cloud_cloud.ply')
+        world_points = _read_ply_binary(ply_path)
+
+    # ── 카메라 궤적은 DB에서 직접 추출 ──
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
-
-    # 모든 노드의 pose 로드
     cursor.execute('SELECT id, pose FROM Node ORDER BY id')
-    poses = {}
+
     cam_positions = []
     for node_id, pose_blob in cursor.fetchall():
         if pose_blob and len(pose_blob) == 48:
             matrix = np.array(struct.unpack('12f', pose_blob)).reshape(3, 4)
             if np.isfinite(matrix).all() and not np.allclose(matrix, 0):
-                poses[node_id] = matrix
                 cam_positions.append(matrix[:, 3])
 
+    conn.close()
     cam_positions = np.array(cam_positions)
 
-    # --- 소스 1: Feature 3D 좌표 (시각 특징점, 희소) ---
-    cursor.execute(
-        'SELECT node_id, depth_x, depth_y, depth_z '
-        'FROM Feature WHERE depth_x != 0 AND depth_y != 0 AND depth_z != 0'
-    )
-
-    world_points = []
-    for node_id, dx, dy, dz in cursor.fetchall():
-        if node_id not in poses:
-            continue
-        matrix = poses[node_id]
-        local = np.array([dx, dy, dz])
-        world = matrix[:, :3] @ local + matrix[:, 3]
-        if np.isfinite(world).all():
-            world_points.append(world)
-
-    feature_count = len(world_points)
-
-    # --- 소스 2: Data.scan (zlib 압축된 4채널 포인트, 더 밀집) ---
-    import zlib
-    cursor.execute(
-        'SELECT d.id, d.scan, d.scan_info, n.pose '
-        'FROM Data d JOIN Node n ON d.id = n.id '
-        'WHERE d.scan IS NOT NULL AND LENGTH(d.scan) > 50'
-    )
-
-    scan_count = 0
-    for nid, scan_blob, scan_info_blob, pose_blob in cursor.fetchall():
-        if not pose_blob or len(pose_blob) != 48:
-            continue
-        pose = np.array(struct.unpack('12f', pose_blob)).reshape(3, 4)
-        if not np.isfinite(pose).all() or np.allclose(pose, 0):
-            continue
-
-        # scan_info에서 local transform 추출 (센서→카메라 좌표 변환)
-        local_tf = np.eye(3, 4)
-        if scan_info_blob and len(scan_info_blob) >= 72:
-            lt = np.array(struct.unpack_from('12f', scan_info_blob, 24)).reshape(3, 4)
-            if np.isfinite(lt).all():
-                local_tf = lt
-
-        try:
-            decompressed = zlib.decompress(scan_blob)
-            n_pts = len(decompressed) // 16  # 4채널 × 4바이트
-            if n_pts < 1:
-                continue
-            pts = np.frombuffer(decompressed, dtype=np.float32).reshape(-1, 4)[:, :3]
-
-            for p in pts:
-                # scan local → camera local → world
-                p_cam = local_tf[:, :3] @ p + local_tf[:, 3]
-                p_world = pose[:, :3] @ p_cam + pose[:, 3]
-                if np.isfinite(p_world).all():
-                    world_points.append(p_world)
-                    scan_count += 1
-        except (zlib.error, ValueError):
-            continue
-
-    conn.close()
-
-    print(f"  Feature 포인트: {feature_count}개")
-    print(f"  Scan 포인트: {scan_count}개")
-
-    world_points = np.array(world_points)
-    print(f"  포인트 클라우드: {len(world_points)}개")
+    print(f"  포인트 클라우드: {len(world_points):,}개 (복셀 {voxel_size}m)")
     print(f"  카메라 궤적: {len(cam_positions)}개")
     print(f"  X: {world_points[:, 0].min():.1f} ~ {world_points[:, 0].max():.1f}m")
     print(f"  Y: {world_points[:, 1].min():.1f} ~ {world_points[:, 1].max():.1f}m")
@@ -128,27 +214,36 @@ def separate_floors_by_z(points, cam_positions, floor_height=3.0):
     """
     카메라 궤적 Z 기반으로 층을 분리하고, 포인트클라우드를 층별 Z 범위로 슬라이싱한다.
 
-    [기존 문제]
-    포인트클라우드 전체 Z로 히스토그램을 만들면 벽/천장 포인트가 섞여서
-    층 피크가 하나로 뭉친다.
-
-    [개선]
-    카메라 궤적 Z는 사람이 걸은 높이이므로 층 구분이 명확하다.
-    1. 카메라 Z로 층 피크 탐지
-    2. 층별 Z 경계 산출 (인접 피크의 중간점)
-    3. 포인트클라우드를 Z 경계로 슬라이싱
+    [계단 처리]
+    vertical_detector로 계단/엘리베이터 구간을 먼저 감지하고,
+    해당 구간의 카메라 궤적을 층 피크 탐지에서 제외한다.
+    계단 구간의 포인트클라우드도 층 할당에서 제외된다.
     """
-    # ─── 카메라 궤적 Z로 층 피크 탐지 ───
+    from services.vertical_detector import detect_stairs_first
+
+    # ─── 계단 구간 감지 및 제외 ───
+    passages, stair_mask = detect_stairs_first(cam_positions)
+    floor_cam_mask = ~stair_mask  # 계단이 아닌 카메라 궤적
+
+    if passages:
+        for p in passages:
+            print(f"  {p['type']}: z={p['z_start']:.1f}→{p['z_end']:.1f}m "
+                  f"({p['direction']}, idx {p['start_idx']}~{p['end_idx']})")
+
+    # 계단 제외된 카메라 궤적으로 층 피크 탐지
+    cam_z_floor = cam_positions[floor_cam_mask, 2] if floor_cam_mask.sum() > 0 else cam_positions[:, 2]
     cam_z = cam_positions[:, 2]
-    z_min, z_max = cam_z.min(), cam_z.max()
+
+    # 계단 제외된 궤적으로 피크 탐지
+    z_min, z_max = cam_z_floor.min(), cam_z_floor.max()
 
     bin_size = 0.3
     num_bins = max(int((z_max - z_min) / bin_size), 10)
-    hist, bin_edges = np.histogram(cam_z, bins=num_bins)
+    hist, bin_edges = np.histogram(cam_z_floor, bins=num_bins)
     bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
     smoothed = gaussian_filter1d(hist.astype(float), sigma=0.8)
 
-    min_count = max(len(cam_z) * 0.03, 3)
+    min_count = max(len(cam_z_floor) * 0.03, 3)
     min_peak_dist = floor_height * 0.7
 
     significant = smoothed >= min_count
@@ -186,19 +281,15 @@ def separate_floors_by_z(points, cam_positions, floor_height=3.0):
     for i in range(len(peaks) - 1):
         z_boundaries.append((peaks[i] + peaks[i + 1]) / 2)
 
-    # ─── 카메라 궤적 층 할당 ───
+    # ─── 카메라 궤적 층 할당 (계단 궤적 제외) ───
     peaks_arr = np.array(peaks)
     cam_floors = np.argmin(np.abs(cam_z[:, None] - peaks_arr[None, :]), axis=1)
 
-    # ─── 포인트클라우드를 층별 Z 범위로 슬라이싱 ───
-    # 각 층의 Z 범위: 카메라 피크 ± (층고/2 + 여유)
-    # 다층이면 경계 사용, 단층이면 피크 ± 마진
-    z_margin = floor_height * 0.6  # 카메라 위아래로 벽/바닥 포함
+    z_margin = floor_height * 0.6
     point_z = points[:, 2]
 
     floors = {}
     for fi in range(len(peaks)):
-        # Z 범위 결정
         if len(peaks) == 1:
             z_lo = peaks[fi] - z_margin
             z_hi = peaks[fi] + z_margin
@@ -207,7 +298,8 @@ def separate_floors_by_z(points, cam_positions, floor_height=3.0):
             z_hi = z_boundaries[fi] if fi < len(peaks) - 1 else peaks[fi] + z_margin
 
         point_mask = (point_z >= z_lo) & (point_z <= z_hi)
-        cam_mask = cam_floors == fi
+        # 계단이 아닌 카메라만 이 층에 포함
+        cam_mask = (cam_floors == fi) & floor_cam_mask
 
         if point_mask.sum() < 50:
             continue
@@ -221,7 +313,8 @@ def separate_floors_by_z(points, cam_positions, floor_height=3.0):
             'cam_count': int(cam_mask.sum()),
         }
         print(f"  {fi+1}층 (z={peaks[fi]:.1f}m, range={z_lo:.1f}~{z_hi:.1f}): "
-              f"포인트 {point_mask.sum()}개, 궤적 {cam_mask.sum()}개")
+              f"포인트 {point_mask.sum()}개, 궤적 {cam_mask.sum()}개 "
+              f"(계단 제외 {stair_mask.sum()}개)")
 
     return floors, peaks
 
@@ -230,19 +323,55 @@ def separate_floors_by_z(points, cam_positions, floor_height=3.0):
 # Step 3: 2D 점유 격자 생성
 # =============================================================================
 
+# ── 바닥 슬라이싱 높이 경계 (바닥 기준, 미터) ──
+GROUND_Z_MIN = 0.05  # 바닥 표면 노이즈 제외
+GROUND_Z_MAX = 0.30  # 바닥 표면 상한
+
+# 셀당 이 개수 이상의 포인트가 있어야 바닥으로 인정
+GROUND_DENSITY_THRESHOLD = 3
+
+
+def _project_to_grid_with_density(points_2d, x_min, y_min, cell_size,
+                                  width, height, min_count):
+    """
+    포인트를 격자에 투영하되, 셀당 min_count 이상일 때만 점유로 판정한다.
+    """
+    occupied = np.zeros((height, width), dtype=np.uint8)
+    if len(points_2d) == 0:
+        return occupied
+    px = ((points_2d[:, 0] - x_min) / cell_size).astype(int)
+    py = ((points_2d[:, 1] - y_min) / cell_size).astype(int)
+    valid = (px >= 0) & (px < width) & (py >= 0) & (py < height)
+
+    count_grid = np.zeros((height, width), dtype=int)
+    np.add.at(count_grid, (py[valid], px[valid]), 1)
+    occupied[count_grid >= min_count] = 1
+    return occupied
+
+
 def create_occupancy_grid(floor_data, cell_size=CELL_SIZE):
     """
-    3D 포인트를 XY 평면에 투영하여 2D 점유 격자를 생성한다.
+    바닥 레이어(Ground)만으로 2D 점유 격자를 생성한다.
+
+    [핵심 아이디어]
+    Ground 레이어(0.05~0.30m)의 포인트가 찍힌 곳 = 바닥이 존재하는 곳.
+    바닥이 있는 곳이 통행 가능 영역이고, 바닥이 없는 곳이 벽/경계이다.
+
+    기존의 3레이어 합집합(Union) 방식은 바닥 포인트를 "장애물"로 취급하여
+    Union/Walkable이 엉망이 되는 문제가 있었다.
 
     각 셀의 상태:
-      0 = UNKNOWN (데이터 없음)
-      1 = OCCUPIED (포인트 존재 = 벽/장애물)
-      2 = FREE (카메라가 지나감 = 통행 가능)
+      0 = UNKNOWN (데이터 없음 = 벽 또는 미스캔)
+      1 = FLOOR (바닥 포인트 존재 = 통행 가능)
     """
     points = floor_data['points']
     cam_pos = floor_data['cam_positions']
+    z_peak = floor_data.get('z_peak', np.median(points[:, 2]))
 
-    # 모든 포인트의 XY 범위 (마진 추가)
+    cam_height = 1.2
+    floor_z = z_peak - cam_height
+
+    # ── XY 범위 ──
     all_xy = points[:, :2]
     if len(cam_pos) > 0:
         all_xy = np.vstack([all_xy, cam_pos[:, :2]])
@@ -250,65 +379,110 @@ def create_occupancy_grid(floor_data, cell_size=CELL_SIZE):
     x_min, y_min = all_xy.min(axis=0) - 1.0
     x_max, y_max = all_xy.max(axis=0) + 1.0
 
-    # 격자 크기
     width = int(np.ceil((x_max - x_min) / cell_size))
     height = int(np.ceil((y_max - y_min) / cell_size))
-    grid = np.zeros((height, width), dtype=np.uint8)  # 0 = UNKNOWN
 
-    # 포인트 → OCCUPIED (1)
-    px = ((points[:, 0] - x_min) / cell_size).astype(int)
-    py = ((points[:, 1] - y_min) / cell_size).astype(int)
-    valid = (px >= 0) & (px < width) & (py >= 0) & (py < height)
-    grid[py[valid], px[valid]] = 1
+    # ── 바닥 레이어 추출 ──
+    ground_mask = (
+        (points[:, 2] >= floor_z + GROUND_Z_MIN) &
+        (points[:, 2] <= floor_z + GROUND_Z_MAX)
+    )
+    floor_grid = _project_to_grid_with_density(
+        points[ground_mask], x_min, y_min, cell_size,
+        width, height, GROUND_DENSITY_THRESHOLD,
+    )
 
-    # 카메라 궤적 → FREE (2)
-    # 카메라 위치 주변 반경(~1m)도 통행 가능으로 마킹
-    if len(cam_pos) > 0:
-        cx = ((cam_pos[:, 0] - x_min) / cell_size).astype(int)
-        cy = ((cam_pos[:, 1] - y_min) / cell_size).astype(int)
-        radius = int(0.8 / cell_size)  # 카메라 주변 0.8m
+    print(f"  바닥 셀: {floor_grid.sum()}, floor_z={floor_z:.2f}m")
 
-        for i in range(len(cx)):
-            if 0 <= cx[i] < width and 0 <= cy[i] < height:
-                # 원형 영역을 FREE로 마킹
-                for dy in range(-radius, radius + 1):
-                    for dx in range(-radius, radius + 1):
-                        if dx*dx + dy*dy <= radius*radius:
-                            ny, nx = cy[i] + dy, cx[i] + dx
-                            if 0 <= ny < height and 0 <= nx < width:
-                                grid[ny, nx] = 2  # FREE가 OCCUPIED를 덮어씀
-
-    return grid, x_min, y_min, width, height
+    return floor_grid, x_min, y_min, width, height
 
 
 # =============================================================================
 # Step 4: 통행 가능 영역 정제
 # =============================================================================
 
-def extract_walkable_area(grid):
+RIDGE_MIN_DIST = 0.3   # 능선 최소 벽 거리 (미터)
+RIDGE_MAX_DIST = 10.0  # 능선 최대 벽 거리 (미터) — 건물 밖 제외
+
+
+def extract_ridge(floor_grid, cam_positions=None, x_min=0, y_min=0,
+                  cell_size=CELL_SIZE):
     """
-    점유 격자에서 통행 가능 영역을 정제한다.
+    Distance Transform의 능선(ridge)을 추출하여 복도 중심선을 구한다.
 
-    1. FREE(2) 영역을 시드로 사용
-    2. UNKNOWN(0) 중 FREE와 연결된 영역도 통행 가능으로 확장
-    3. OCCUPIED(1)로 둘러싸인 UNKNOWN은 제외
-    4. 모폴로지 연산(닫기)으로 작은 구멍 메우기
+    [핵심]
+    벽까지 거리의 국소 최댓값 = 양쪽 벽에서 가장 먼 지점 = 복도 한가운데.
+    넓은 복도든 좁은 복도든 중심선 1줄만 나온다.
+    walkable → skeleton 과정이 불필요.
+
+    [알고리즘]
+    1. Distance Transform: 각 셀에서 벽까지 거리
+    2. 국소 최댓값(ridge) 추출: 4방향 중 하나라도 양쪽보다 크면 능선
+    3. 카메라 궤적 근처 연결 영역만 유지
     """
-    # FREE 영역 = 카메라가 지나간 곳
-    walkable = (grid == 2).astype(np.uint8)
+    h, w = floor_grid.shape
 
-    # 팽창으로 카메라 주변 확장 (벽 가까이도 통행 가능)
-    struct = np.ones((3, 3), dtype=bool)
-    walkable = binary_dilation(walkable, structure=struct, iterations=2).astype(np.uint8)
+    # ── 벽까지 거리 + 스무딩 ──
+    dist = distance_transform_edt(floor_grid == 0) * cell_size
+    from scipy.ndimage import gaussian_filter
+    dist = gaussian_filter(dist, sigma=2.0)
 
-    # OCCUPIED 영역은 통행 불가로 되돌리기
-    walkable[grid == 1] = 0
+    # ── Ridge 추출: 국소 최댓값 ──
+    ridge = np.zeros((h, w), dtype=np.uint8)
 
-    # 작은 구멍 메우기 (모폴로지 닫기)
-    walkable = binary_dilation(walkable, iterations=1).astype(np.uint8)
-    walkable = binary_erosion(walkable, iterations=1).astype(np.uint8)
+    for i in range(1, h - 1):
+        for j in range(1, w - 1):
+            val = dist[i, j]
+            if val < RIDGE_MIN_DIST or val > RIDGE_MAX_DIST:
+                continue
 
-    return walkable
+            # 4방향 쌍 중 하나라도 양쪽보다 크거나 같으면 능선
+            is_ridge = (
+                (val >= dist[i - 1, j] and val >= dist[i + 1, j]) or
+                (val >= dist[i, j - 1] and val >= dist[i, j + 1]) or
+                (val >= dist[i - 1, j - 1] and val >= dist[i + 1, j + 1]) or
+                (val >= dist[i - 1, j + 1] and val >= dist[i + 1, j - 1])
+            )
+            if is_ridge:
+                ridge[i, j] = 1
+
+    # ── Ridge thinning: 1픽셀 폭으로 축소 ──
+    ridge = skeletonize(ridge)
+
+    # ── 카메라 궤적과 연결된 영역만 유지 ──
+    if cam_positions is not None and len(cam_positions) > 0:
+        labeled, n_labels = label(ridge)
+        if n_labels > 1:
+            cx = ((cam_positions[:, 0] - x_min) / cell_size).astype(int)
+            cy = ((cam_positions[:, 1] - y_min) / cell_size).astype(int)
+
+            # 카메라 위치에서 가장 가까운 ridge 셀의 레이블 수집
+            cam_labels = set()
+            search_r = int(2.0 / cell_size)  # 카메라에서 2m 이내 ridge 탐색
+            for ci in range(len(cx)):
+                if not (0 <= cx[ci] < w and 0 <= cy[ci] < h):
+                    continue
+                for dy in range(-search_r, search_r + 1):
+                    for dx in range(-search_r, search_r + 1):
+                        ny, nx = cy[ci] + dy, cx[ci] + dx
+                        if 0 <= ny < h and 0 <= nx < w:
+                            lbl = labeled[ny, nx]
+                            if lbl > 0:
+                                cam_labels.add(lbl)
+
+            if cam_labels:
+                keep = np.zeros((h, w), dtype=np.uint8)
+                for lbl in cam_labels:
+                    keep[labeled == lbl] = 1
+                ridge = keep
+
+    return ridge
+
+
+def extract_walkable_area(floor_grid, cam_positions=None, x_min=0, y_min=0,
+                          cell_size=CELL_SIZE):
+    """extract_ridge의 호환용 래퍼."""
+    return extract_ridge(floor_grid, cam_positions, x_min, y_min, cell_size)
 
 
 # =============================================================================
@@ -403,7 +577,7 @@ def skeletonize(binary_image):
     return img
 
 
-SPUR_MIN_LENGTH = 5.0  # 이 길이(미터) 미만인 가지는 제거
+SPUR_MIN_LENGTH = 10.0  # 이 길이(미터) 미만인 가지는 제거
 
 
 def remove_spurs(skeleton, cell_size=CELL_SIZE, min_length=SPUR_MIN_LENGTH):
@@ -487,9 +661,9 @@ def remove_spurs(skeleton, cell_size=CELL_SIZE, min_length=SPUR_MIN_LENGTH):
 # Step 6: 스켈레톤에서 그래프 추출
 # =============================================================================
 
-WAYPOINT_INTERVAL = 3.0  # 중간 노드 배치 간격 (미터)
+WAYPOINT_INTERVAL = 1.0  # 중간 노드 배치 간격 (미터)
 SMOOTH_WINDOW = 15       # 경로 스무딩 윈도우 크기
-MIN_EDGE_LENGTH = 1.0    # 이 길이 미만인 엣지는 병합
+MIN_EDGE_LENGTH = 0.4    # 이 길이 미만인 엣지는 병합
 
 
 def _smooth_path_pixels(path, window=SMOOTH_WINDOW):
@@ -574,8 +748,6 @@ def skeleton_to_graph(skeleton, x_min, y_min, cell_size, z_height):
         nc = neighbor_count[pos[0], pos[1]]
         _get_or_create_node(pos, 'ENDPOINT' if nc == 1 else 'JUNCTION')
 
-    waypoint_interval_px = max(1, int(WAYPOINT_INTERVAL / cell_size))
-
     # 각 키 노드에서 경로 추적
     for start_pos in list(key_node_set):
         si, sj = start_pos
@@ -634,20 +806,27 @@ def skeleton_to_graph(skeleton, x_min, y_min, cell_size, z_height):
                 # 경로 스무딩
                 smoothed = _smooth_path_pixels(path)
 
-                # 스무딩된 경로 위에 일정 간격으로 WAYPOINT 배치
+                # 스무딩된 경로를 월드 좌표로 변환
+                world_path = []
+                for py, px in smoothed:
+                    wx = x_min + px * cell_size
+                    wy = y_min + py * cell_size
+                    world_path.append((wx, wy))
+
+                # 월드 좌표 기준 WAYPOINT_INTERVAL 간격으로 균일 배치
                 chain_node_ids = [node_map[start_pos]]
-                accumulated = 0
+                accumulated_m = 0.0
 
-                for k in range(1, len(smoothed)):
-                    py, px = smoothed[k - 1]
-                    cy, cx = smoothed[k]
-                    step_dist = np.sqrt((cy - py)**2 + (cx - px)**2)
-                    accumulated += step_dist
+                for k in range(1, len(world_path)):
+                    dx = world_path[k][0] - world_path[k-1][0]
+                    dy = world_path[k][1] - world_path[k-1][1]
+                    step_m = np.sqrt(dx*dx + dy*dy)
+                    accumulated_m += step_m
 
-                    if accumulated >= waypoint_interval_px and smoothed[k] != found_end:
+                    if accumulated_m >= WAYPOINT_INTERVAL and smoothed[k] != found_end:
                         wp_id = _get_or_create_node(smoothed[k], 'WAYPOINT')
                         chain_node_ids.append(wp_id)
-                        accumulated = 0
+                        accumulated_m = 0.0
 
                 chain_node_ids.append(node_map[found_end])
 
@@ -1070,8 +1249,11 @@ def build_pointcloud_graph(db_path):
         fdata['nodes'] = nodes
         fdata['edges'] = edges
 
-        # 짧은 엣지 병합: 연결 수 2인 노드(통과 노드)가 짧은 엣지를 가지면 제거
-        nodes, edges = _merge_short_edges(nodes, edges, MIN_EDGE_LENGTH)
+        # 이상치 노드 제거
+        nodes, edges = _remove_outlier_nodes(nodes, edges)
+
+        # 경로 직선화 + 균일 간격 리샘플링
+        nodes, edges = _beautify_graph(nodes, edges, WAYPOINT_INTERVAL)
 
         floor_level = fi + 1
         nodes_dict = _convert_nodes(nodes, floor_level)
@@ -1082,76 +1264,560 @@ def build_pointcloud_graph(db_path):
     return floor_graphs, floors, peaks, world_points, cam_positions
 
 
+JUNCTION_MERGE_RADIUS = 1.5  # 이 거리 이내의 분기점은 하나로 병합 (미터)
+
+
+def _beautify_graph(nodes, edges, interval):
+    """
+    그래프 토폴로지를 유지하면서 경로를 직선화하고 균일 간격으로 리샘플링.
+
+    1. 키 노드(분기점/끝점) 식별
+    2. 키 노드 사이의 체인 추출
+    3. 각 체인을 RDP → 각도 스냅 → 직선화
+    4. 직선화된 경로 위에 interval 간격으로 새 노드 배치
+    5. 새 그래프 조립
+    """
+    if not nodes or not edges:
+        return nodes, edges
+
+    # 인접 리스트 구축
+    adj = {}
+    for n in nodes:
+        adj[n['id']] = []
+    for e in edges:
+        adj.setdefault(e['from'], []).append(e['to'])
+        adj.setdefault(e['to'], []).append(e['from'])
+
+    # 키 노드: 연결 수 != 2 (분기점, 끝점)
+    key_ids = {nid for nid, neighbors in adj.items() if len(neighbors) != 2}
+
+    # 연결 수 0인 고립 노드도 키 노드
+    for n in nodes:
+        if n['id'] not in adj or not adj[n['id']]:
+            key_ids.add(n['id'])
+
+    node_by_id = {n['id']: n for n in nodes}
+
+    # 체인 추출: 키 노드 → 키 노드 사이의 경로
+    chains = []
+    visited_pairs = set()
+
+    for start_id in key_ids:
+        for next_id in adj.get(start_id, []):
+            pair_key = tuple(sorted([start_id, next_id]))
+            if pair_key in visited_pairs:
+                continue
+
+            # 체인 추적
+            chain = [start_id, next_id]
+            curr = next_id
+            prev = start_id
+
+            while curr not in key_ids:
+                neighbors = adj.get(curr, [])
+                next_hop = [n for n in neighbors if n != prev]
+                if not next_hop:
+                    break
+                prev = curr
+                curr = next_hop[0]
+                chain.append(curr)
+
+            # 시작-끝 쌍 중복 방지
+            chain_key = tuple(sorted([chain[0], chain[-1]]))
+            if chain_key in visited_pairs:
+                continue
+            visited_pairs.add(chain_key)
+
+            # 체인의 좌표 수집
+            coords = []
+            for nid in chain:
+                n = node_by_id.get(nid)
+                if n:
+                    coords.append([n['x'], n['y']])
+
+            if len(coords) >= 2:
+                chains.append({
+                    'start_id': chain[0],
+                    'end_id': chain[-1],
+                    'coords': np.array(coords),
+                    'z': node_by_id[chain[0]]['z'],
+                })
+
+    # 새 그래프 조립
+    new_nodes = []
+    new_edges = []
+    new_node_map = {}  # (x_round, y_round) → node
+    next_id = 0
+
+    def _add_node(x, y, z, node_type):
+        nonlocal next_id
+        # 좌표 반올림으로 중복 체크 (1cm 정밀도)
+        key = (round(x, 2), round(y, 2))
+        if key in new_node_map:
+            return new_node_map[key]['id']
+        node = {
+            'id': next_id,
+            'x': float(x),
+            'y': float(y),
+            'z': float(z),
+            'type': node_type,
+            'grid_pos': (0, 0),
+        }
+        new_nodes.append(node)
+        new_node_map[key] = node
+        next_id += 1
+        return node['id']
+
+    for chain in chains:
+        coords = chain['coords']
+        z = chain['z']
+        start_key_id = chain['start_id']
+        end_key_id = chain['end_id']
+
+        # 1. RDP 단순화
+        simplified = _rdp(coords, epsilon=0.3)
+
+        # 2. 스플라인 스무딩 (부드러운 곡선)
+        smoothed = _smooth_spline(simplified)
+
+        # 3. 균일 간격 리샘플링
+        resampled = _resample_path(smoothed, interval)
+
+        if len(resampled) < 2:
+            resampled = np.array([coords[0], coords[-1]])
+
+        # 4. 노드 생성
+        chain_node_ids = []
+        for i, pt in enumerate(resampled):
+            if i == 0:
+                ntype = node_by_id[start_key_id].get('type', 'ENDPOINT')
+                if len(adj.get(start_key_id, [])) >= 3:
+                    ntype = 'JUNCTION'
+            elif i == len(resampled) - 1:
+                ntype = node_by_id[end_key_id].get('type', 'ENDPOINT')
+                if len(adj.get(end_key_id, [])) >= 3:
+                    ntype = 'JUNCTION'
+            else:
+                ntype = 'WAYPOINT'
+
+            nid = _add_node(pt[0], pt[1], z, ntype)
+            chain_node_ids.append(nid)
+
+        # 5. 엣지 생성
+        for i in range(len(chain_node_ids) - 1):
+            a = chain_node_ids[i]
+            b = chain_node_ids[i + 1]
+            if a == b:
+                continue
+            na = new_node_map.get(
+                (round(new_nodes[a]['x'], 2), round(new_nodes[a]['y'], 2)),
+                new_nodes[a]
+            )
+            nb_node = next((n for n in new_nodes if n['id'] == b), None)
+            na_node = next((n for n in new_nodes if n['id'] == a), None)
+            if na_node and nb_node:
+                dist = float(np.sqrt(
+                    (na_node['x'] - nb_node['x'])**2 +
+                    (na_node['y'] - nb_node['y'])**2
+                ))
+                if dist > 0.01:
+                    new_edges.append({
+                        'from': a,
+                        'to': b,
+                        'distance': dist,
+                    })
+
+    # 중복 엣지 제거
+    seen = set()
+    unique_edges = []
+    for e in new_edges:
+        key = tuple(sorted([e['from'], e['to']]))
+        if key not in seen:
+            seen.add(key)
+            unique_edges.append(e)
+
+    # 가까운 분기 노드 병합
+    new_nodes, unique_edges = _merge_nearby_junctions(
+        new_nodes, unique_edges, JUNCTION_MERGE_RADIUS
+    )
+
+    return new_nodes, unique_edges
+
+
+def _rdp(points, epsilon):
+    """Ramer-Douglas-Peucker 단순화"""
+    if len(points) <= 2:
+        return points
+
+    # 시작-끝 직선에서 가장 먼 점 찾기
+    start = points[0]
+    end = points[-1]
+    line_vec = end - start
+    line_len = np.linalg.norm(line_vec)
+
+    if line_len < 1e-10:
+        return np.array([start, end])
+
+    line_unit = line_vec / line_len
+
+    max_dist = 0
+    max_idx = 0
+    for i in range(1, len(points) - 1):
+        vec = points[i] - start
+        proj = np.dot(vec, line_unit)
+        proj = np.clip(proj, 0, line_len)
+        closest = start + proj * line_unit
+        dist = np.linalg.norm(points[i] - closest)
+        if dist > max_dist:
+            max_dist = dist
+            max_idx = i
+
+    if max_dist > epsilon:
+        left = _rdp(points[:max_idx + 1], epsilon)
+        right = _rdp(points[max_idx:], epsilon)
+        return np.vstack([left[:-1], right])
+    else:
+        return np.array([start, end])
+
+
+def _smooth_spline(points):
+    """
+    RDP로 단순화된 경로를 스플라인 보간으로 부드럽게 만든다.
+    시작/끝점은 유지하면서 중간 경로를 부드러운 곡선으로.
+    """
+    if len(points) <= 2:
+        return points
+
+    from scipy.interpolate import splprep, splev
+
+    try:
+        x = points[:, 0]
+        y = points[:, 1]
+
+        # 누적 거리를 매개변수로 사용
+        dists = np.sqrt(np.diff(x)**2 + np.diff(y)**2)
+        cum_dist = np.concatenate([[0], np.cumsum(dists)])
+        total = cum_dist[-1]
+
+        if total < 1e-6:
+            return points
+
+        # 정규화
+        u = cum_dist / total
+
+        # 스플라인 피팅 (s: 스무딩 팩터, 클수록 부드러움)
+        k = min(3, len(points) - 1)  # 차수
+        s = len(points) * 0.5  # 스무딩 강도
+        tck, _ = splprep([x, y], u=u, k=k, s=s)
+
+        # 촘촘하게 평가
+        n_eval = max(len(points) * 3, 20)
+        u_new = np.linspace(0, 1, n_eval)
+        x_new, y_new = splev(u_new, tck)
+
+        # 시작/끝점 강제 고정
+        x_new[0], y_new[0] = points[0]
+        x_new[-1], y_new[-1] = points[-1]
+
+        return np.column_stack([x_new, y_new])
+
+    except Exception:
+        # 스플라인 실패 시 원본 반환
+        return points
+
+
+def _merge_nearby_junctions(nodes, edges, radius):
+    """
+    radius 이내의 분기 노드들을 하나로 병합한다.
+    병합된 노드의 좌표는 무게중심.
+    """
+    if not nodes or not edges:
+        return nodes, edges
+
+    # 분기 노드 찾기 (연결 수 > 2 또는 type이 JUNCTION)
+    conn = {}
+    for e in edges:
+        conn[e['from']] = conn.get(e['from'], 0) + 1
+        conn[e['to']] = conn.get(e['to'], 0) + 1
+
+    junction_ids = [
+        n['id'] for n in nodes
+        if conn.get(n['id'], 0) > 2 or n.get('type') == 'JUNCTION'
+    ]
+
+    if len(junction_ids) < 2:
+        return nodes, edges
+
+    node_by_id = {n['id']: n for n in nodes}
+
+    # 가까운 분기 노드끼리 그룹화 (Union-Find)
+    parent = {jid: jid for jid in junction_ids}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    for i in range(len(junction_ids)):
+        for j in range(i + 1, len(junction_ids)):
+            a, b = junction_ids[i], junction_ids[j]
+            na, nb = node_by_id[a], node_by_id[b]
+            dist = np.sqrt((na['x'] - nb['x'])**2 + (na['y'] - nb['y'])**2)
+            if dist <= radius:
+                union(a, b)
+
+    # 그룹별 대표 노드 결정 (무게중심)
+    groups = {}
+    for jid in junction_ids:
+        root = find(jid)
+        groups.setdefault(root, []).append(jid)
+
+    # 병합 매핑: old_id → new_id
+    merge_map = {}
+    for root, members in groups.items():
+        if len(members) <= 1:
+            continue
+
+        # 무게중심 계산
+        xs = [node_by_id[m]['x'] for m in members]
+        ys = [node_by_id[m]['y'] for m in members]
+        cx, cy = np.mean(xs), np.mean(ys)
+
+        # 대표 노드 = 무게중심에 가장 가까운 노드
+        best = min(members, key=lambda m: (node_by_id[m]['x'] - cx)**2 + (node_by_id[m]['y'] - cy)**2)
+
+        # 대표 노드 좌표를 무게중심으로 이동
+        node_by_id[best]['x'] = float(cx)
+        node_by_id[best]['y'] = float(cy)
+        node_by_id[best]['type'] = 'JUNCTION'
+
+        for m in members:
+            if m != best:
+                merge_map[m] = best
+
+    if not merge_map:
+        return nodes, edges
+
+    # 노드 필터링
+    remove_ids = set(merge_map.keys())
+    nodes = [n for n in nodes if n['id'] not in remove_ids]
+
+    # 엣지 리매핑
+    new_edges = []
+    seen = set()
+    for e in edges:
+        f = merge_map.get(e['from'], e['from'])
+        t = merge_map.get(e['to'], e['to'])
+        if f == t:
+            continue
+        key = tuple(sorted([f, t]))
+        if key in seen:
+            continue
+        seen.add(key)
+
+        nf = node_by_id.get(f)
+        nt = node_by_id.get(t)
+        if nf and nt:
+            dist = float(np.sqrt((nf['x'] - nt['x'])**2 + (nf['y'] - nt['y'])**2))
+            new_edges.append({'from': f, 'to': t, 'distance': dist})
+
+    return nodes, new_edges
+
+
+def _resample_path(points, interval):
+    """경로를 interval 간격으로 균일하게 리샘플링. 시작/끝점은 유지."""
+    if len(points) < 2:
+        return points
+
+    # 누적 거리 계산
+    dists = [0.0]
+    for i in range(1, len(points)):
+        d = np.linalg.norm(points[i] - points[i-1])
+        dists.append(dists[-1] + d)
+
+    total_length = dists[-1]
+    if total_length < interval:
+        return np.array([points[0], points[-1]])
+
+    # 균일 간격 위치 생성
+    n_segments = max(1, round(total_length / interval))
+    actual_interval = total_length / n_segments
+    target_dists = [i * actual_interval for i in range(n_segments + 1)]
+
+    # 보간
+    resampled = []
+    seg_idx = 0
+    for td in target_dists:
+        while seg_idx < len(dists) - 1 and dists[seg_idx + 1] < td:
+            seg_idx += 1
+
+        if seg_idx >= len(dists) - 1:
+            resampled.append(points[-1].copy())
+            continue
+
+        seg_len = dists[seg_idx + 1] - dists[seg_idx]
+        if seg_len < 1e-10:
+            resampled.append(points[seg_idx].copy())
+            continue
+
+        t = (td - dists[seg_idx]) / seg_len
+        pt = points[seg_idx] * (1 - t) + points[seg_idx + 1] * t
+        resampled.append(pt)
+
+    return np.array(resampled)
+
+
+def _remove_outlier_nodes(nodes, edges, min_group_size=3):
+    """
+    메인 그래프에서 분리된 소그룹/고립 노드를 제거한다.
+
+    연결 요소 분석으로 가장 큰 그룹만 유지.
+    min_group_size 미만인 연결 요소는 이상치로 간주.
+    """
+    if not nodes or not edges:
+        return nodes, edges
+
+    node_ids = {n['id'] for n in nodes}
+
+    # 인접 리스트 구축
+    adj = {nid: set() for nid in node_ids}
+    for e in edges:
+        if e['from'] in adj and e['to'] in adj:
+            adj[e['from']].add(e['to'])
+            adj[e['to']].add(e['from'])
+
+    # BFS로 연결 요소 찾기
+    visited = set()
+    components = []
+
+    for nid in node_ids:
+        if nid in visited:
+            continue
+        component = set()
+        queue = [nid]
+        while queue:
+            curr = queue.pop(0)
+            if curr in visited:
+                continue
+            visited.add(curr)
+            component.add(curr)
+            for neighbor in adj.get(curr, []):
+                if neighbor not in visited:
+                    queue.append(neighbor)
+        components.append(component)
+
+    if not components:
+        return nodes, edges
+
+    # 가장 큰 연결 요소 유지 + min_group_size 이상인 요소도 유지
+    largest = max(components, key=len)
+    keep_ids = set()
+    for comp in components:
+        if comp == largest or len(comp) >= min_group_size:
+            keep_ids.update(comp)
+
+    removed = node_ids - keep_ids
+    if removed:
+        nodes = [n for n in nodes if n['id'] in keep_ids]
+        edges = [e for e in edges if e['from'] in keep_ids and e['to'] in keep_ids]
+
+    return nodes, edges
+
+
 def _merge_short_edges(nodes, edges, min_length):
     """
-    짧은 엣지의 중간 노드를 제거하고 양쪽 엣지를 하나로 합친다.
+    짧은 엣지를 병합한다.
 
-    연결 수 2인 노드(직선 통과 노드)가 짧은 엣지를 가지면:
-    A --short-- B -- C  →  A -- C (B 제거)
+    짧은 엣지의 양쪽 노드 중 연결 수가 적은 쪽을 많은 쪽으로 흡수.
+    연결 수 같으면 WAYPOINT를 우선 제거.
     """
     changed = True
     while changed:
         changed = False
 
-        # 각 노드의 연결 엣지 수 계산
-        conn_count = {}
+        # 연결 수 계산
+        conn = {}
         for e in edges:
-            conn_count[e['from']] = conn_count.get(e['from'], 0) + 1
-            conn_count[e['to']] = conn_count.get(e['to'], 0) + 1
+            conn[e['from']] = conn.get(e['from'], 0) + 1
+            conn[e['to']] = conn.get(e['to'], 0) + 1
 
-        node_ids = {n['id'] for n in nodes}
-        remove_nodes = set()
+        # 가장 짧은 엣지부터 처리
+        short_edges = sorted(
+            [e for e in edges if e['distance'] < min_length],
+            key=lambda x: x['distance']
+        )
 
-        for e in edges:
-            if e['distance'] >= min_length:
+        for e in short_edges:
+            a, b = e['from'], e['to']
+            ca = conn.get(a, 0)
+            cb = conn.get(b, 0)
+
+            # 둘 다 연결 수 1이면 (고립 쌍) 스킵
+            if ca <= 1 and cb <= 1:
                 continue
 
-            # 짧은 엣지의 양쪽 노드 중 연결 수 2인 놈을 제거
-            for nid in [e['from'], e['to']]:
-                if nid in remove_nodes:
-                    continue
-                if conn_count.get(nid, 0) != 2:
-                    continue
-                # 이 노드에 연결된 2개 엣지 찾기
-                connected = [x for x in edges if x['from'] == nid or x['to'] == nid]
-                if len(connected) != 2:
-                    continue
+            # 제거할 노드: 연결 수 적은 쪽, 같으면 WAYPOINT 우선
+            na = next((n for n in nodes if n['id'] == a), None)
+            nb = next((n for n in nodes if n['id'] == b), None)
+            if not na or not nb:
+                continue
 
-                # 반대쪽 노드들 찾기
-                e1, e2 = connected
-                other1 = e1['to'] if e1['from'] == nid else e1['from']
-                other2 = e2['to'] if e2['from'] == nid else e2['from']
+            if ca < cb:
+                remove_id, keep_id = a, b
+            elif cb < ca:
+                remove_id, keep_id = b, a
+            elif na.get('type') == 'WAYPOINT':
+                remove_id, keep_id = a, b
+            elif nb.get('type') == 'WAYPOINT':
+                remove_id, keep_id = b, a
+            else:
+                remove_id, keep_id = a, b
 
-                if other1 == other2:
-                    continue
+            # remove_id의 모든 엣지를 keep_id로 이관
+            new_edges = []
+            for ex in edges:
+                if ex is e:
+                    continue  # 짧은 엣지 자체는 삭제
+                fa, ta = ex['from'], ex['to']
+                if fa == remove_id:
+                    fa = keep_id
+                if ta == remove_id:
+                    ta = keep_id
+                if fa == ta:
+                    continue  # 자기 루프 방지
+                new_edges.append({'from': fa, 'to': ta, 'distance': ex['distance']})
 
-                # 새 엣지 생성 (other1 → other2)
-                n1 = next((n for n in nodes if n['id'] == other1), None)
-                n2 = next((n for n in nodes if n['id'] == other2), None)
-                if not n1 or not n2:
-                    continue
+            # 거리 재계산
+            keep_node = next(n for n in nodes if n['id'] == keep_id)
+            for ex in new_edges:
+                n_from = next((n for n in nodes if n['id'] == ex['from']), None)
+                n_to = next((n for n in nodes if n['id'] == ex['to']), None)
+                if n_from and n_to:
+                    ex['distance'] = float(np.sqrt(
+                        (n_from['x'] - n_to['x'])**2 + (n_from['y'] - n_to['y'])**2
+                    ))
 
-                new_dist = np.sqrt((n1['x'] - n2['x'])**2 + (n1['y'] - n2['y'])**2)
-                edges.append({
-                    'from': other1,
-                    'to': other2,
-                    'distance': float(new_dist),
-                })
+            edges = new_edges
+            nodes = [n for n in nodes if n['id'] != remove_id]
+            changed = True
+            break
 
-                # 기존 2개 엣지 제거
-                edges.remove(e1)
-                edges.remove(e2)
-                remove_nodes.add(nid)
-                changed = True
-                break
+    # 중복 엣지 제거
+    seen = set()
+    unique_edges = []
+    for e in edges:
+        key = tuple(sorted([e['from'], e['to']]))
+        if key not in seen:
+            seen.add(key)
+            unique_edges.append(e)
 
-            if changed:
-                break
-
-        if remove_nodes:
-            nodes = [n for n in nodes if n['id'] not in remove_nodes]
-
-    return nodes, edges
+    return nodes, unique_edges
 
 
 def _convert_nodes(pc_nodes, floor_level):

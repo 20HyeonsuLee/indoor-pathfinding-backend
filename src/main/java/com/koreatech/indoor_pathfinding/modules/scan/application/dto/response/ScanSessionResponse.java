@@ -17,6 +17,7 @@ public record ScanSessionResponse(
     String processedPreviewPath,
     Integer totalNodes,
     Double totalDistance,
+    String plyFileId,
     LocalDateTime createdAt,
     LocalDateTime updatedAt
 ) {
@@ -32,6 +33,7 @@ public record ScanSessionResponse(
             session.getProcessedPreviewPath(),
             session.getTotalNodes(),
             session.getTotalDistance(),
+            session.getPlyFileId(),
             session.getCreatedAt(),
             session.getUpdatedAt()
         );

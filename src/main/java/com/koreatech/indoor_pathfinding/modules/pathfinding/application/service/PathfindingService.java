@@ -7,9 +7,8 @@ import com.koreatech.indoor_pathfinding.modules.pathfinding.application.dto.requ
 import com.koreatech.indoor_pathfinding.modules.pathfinding.application.dto.response.PathfindingResponse;
 import com.koreatech.indoor_pathfinding.modules.pathfinding.application.dto.response.PathfindingResponse.*;
 import com.koreatech.indoor_pathfinding.modules.pathfinding.application.query.PoiReader;
-import com.koreatech.indoor_pathfinding.modules.pathfinding.domain.model.NodeType;
-import com.koreatech.indoor_pathfinding.modules.pathfinding.domain.model.PathNode;
-import com.koreatech.indoor_pathfinding.modules.pathfinding.domain.model.PathPreference;
+import com.koreatech.indoor_pathfinding.modules.pathfinding.domain.model.*;
+import com.koreatech.indoor_pathfinding.modules.pathfinding.domain.repository.PathEdgeRepository;
 import com.koreatech.indoor_pathfinding.modules.pathfinding.domain.repository.PathNodeRepository;
 import com.koreatech.indoor_pathfinding.shared.exception.BusinessException;
 import com.koreatech.indoor_pathfinding.shared.exception.ErrorCode;
@@ -19,6 +18,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.UUID;
 
@@ -28,11 +28,12 @@ import java.util.UUID;
 @Transactional(readOnly = true)
 public class PathfindingService {
 
-    private static final double WALKING_SPEED_MPS = 1.4; // 1.4 m/s average walking speed
+    private static final double WALKING_SPEED_MPS = 1.4;
 
     private final PathNodeRepository pathNodeRepository;
     private final FloorRepository floorRepository;
     private final BuildingRepository buildingRepository;
+    private final PathEdgeRepository pathEdgeRepository;
     private final PoiReader poiReader;
     private final AStarPathfinder aStarPathfinder;
 
@@ -41,42 +42,34 @@ public class PathfindingService {
             buildingId, request.startFloorLevel(), request.startX(), request.startY(),
             request.destinationName());
 
-        // Validate building exists
         if (!buildingRepository.existsById(buildingId)) {
             throw new BusinessException(ErrorCode.BUILDING_NOT_FOUND);
         }
 
-        // Check if graph exists
         List<PathNode> nodes = pathNodeRepository.findByBuildingId(buildingId);
         if (nodes.isEmpty()) {
             throw new BusinessException(ErrorCode.GRAPH_NOT_BUILT,
                 "No pathfinding graph available for this building");
         }
 
-        // Find start floor
         Floor startFloor = floorRepository.findByBuildingIdAndLevel(
                 buildingId, request.startFloorLevel())
             .orElseThrow(() -> new BusinessException(ErrorCode.FLOOR_NOT_FOUND,
                 "Floor " + request.startFloorLevel() + " not found"));
 
-        // Find nearest node to start coordinates
-        PathNode startNode = pathNodeRepository.findNearestNodeOnFloor(
-                startFloor.getId(),
-                request.startX(),
-                request.startY(),
-                request.getStartZOrDefault())
-            .orElseThrow(() -> new BusinessException(ErrorCode.NODE_NOT_FOUND,
-                "No node found near the start coordinates"));
-
-        // Find destination node by POI name
         PathNode goalNode = poiReader.findNodeByPoiName(buildingId, request.destinationName());
 
-        // Handle: start == goal
+        // 가장 가까운 엣지에 투영하여 시작 노드 결정
+        PathNode startNode = findStartNodeByEdgeProjection(
+            startFloor.getId(), buildingId,
+            request.startX(), request.startY(),
+            goalNode, request.getPreferenceOrDefault()
+        );
+
         if (startNode.getId().equals(goalNode.getId())) {
             return buildAlreadyAtDestinationResponse(request, startNode);
         }
 
-        // Run A* algorithm
         PathPreference preference = request.getPreferenceOrDefault();
         List<PathNode> path = aStarPathfinder.findPath(startNode, goalNode, preference);
 
@@ -87,6 +80,103 @@ public class PathfindingService {
         return buildResponse(request, path);
     }
 
+    /**
+     * 가장 가까운 엣지에 사용자 위치를 투영하여 최적 시작 노드를 결정한다.
+     * 가까운 엣지 순으로 시도하여, 목적지까지 경로가 존재하는 첫 번째 엣지를 사용한다.
+     * (격리된 서브그래프 자동 스킵)
+     */
+    private PathNode findStartNodeByEdgeProjection(
+            UUID floorId, UUID buildingId,
+            double userX, double userY,
+            PathNode goalNode, PathPreference preference) {
+
+        List<PathEdge> floorEdges = pathEdgeRepository.findByFloorIdWithNodes(floorId)
+            .stream()
+            .filter(e -> e.getEdgeType() == EdgeType.HORIZONTAL)
+            .toList();
+
+        if (floorEdges.isEmpty()) {
+            return pathNodeRepository.findNearestNodeOnFloor(floorId, userX, userY, 0.0)
+                .orElseThrow(() -> new BusinessException(ErrorCode.NODE_NOT_FOUND));
+        }
+
+        // 모든 엣지를 투영 거리 순으로 정렬
+        record EdgeProjection(PathEdge edge, double projDist, double distToFrom, double distToTo) {}
+
+        List<EdgeProjection> projections = new ArrayList<>();
+
+        for (PathEdge edge : floorEdges) {
+            PathNode from = edge.getFromNode();
+            PathNode to = edge.getToNode();
+
+            double dx = to.getX() - from.getX();
+            double dy = to.getY() - from.getY();
+            double lenSq = dx * dx + dy * dy;
+            if (lenSq == 0) continue;
+
+            double t = Math.max(0, Math.min(1,
+                ((userX - from.getX()) * dx + (userY - from.getY()) * dy) / lenSq));
+
+            double projX = from.getX() + t * dx;
+            double projY = from.getY() + t * dy;
+            double projDist = Math.sqrt((projX - userX) * (projX - userX) + (projY - userY) * (projY - userY));
+            double dFrom = Math.sqrt((projX - from.getX()) * (projX - from.getX()) +
+                (projY - from.getY()) * (projY - from.getY()));
+            double dTo = Math.sqrt((projX - to.getX()) * (projX - to.getX()) +
+                (projY - to.getY()) * (projY - to.getY()));
+
+            projections.add(new EdgeProjection(edge, projDist, dFrom, dTo));
+        }
+
+        projections.sort(Comparator.comparingDouble(ep -> ep.projDist));
+
+        // 가까운 엣지부터 시도 - 경로가 존재하는 첫 번째 엣지 사용
+        for (EdgeProjection proj : projections) {
+            PathNode fromNode = proj.edge.getFromNode();
+            PathNode toNode = proj.edge.getToNode();
+
+            List<PathNode> pathViaFrom = aStarPathfinder.findPath(fromNode, goalNode, preference);
+            List<PathNode> pathViaTo = aStarPathfinder.findPath(toNode, goalNode, preference);
+
+            boolean fromReachable = !pathViaFrom.isEmpty();
+            boolean toReachable = !pathViaTo.isEmpty();
+
+            if (!fromReachable && !toReachable) {
+                log.debug("Edge {}-{} skipped (disconnected from goal)",
+                    fromNode.getId().toString().substring(0, 8),
+                    toNode.getId().toString().substring(0, 8));
+                continue;
+            }
+
+            double costFrom = fromReachable ? proj.distToFrom + totalPathDistance(pathViaFrom) : Double.MAX_VALUE;
+            double costTo = toReachable ? proj.distToTo + totalPathDistance(pathViaTo) : Double.MAX_VALUE;
+
+            PathNode chosen = costFrom <= costTo ? fromNode : toNode;
+            log.info("Edge projection: edge {}-{} (projDist={}m), chose {} (costFrom={}, costTo={})",
+                fromNode.getId().toString().substring(0, 8),
+                toNode.getId().toString().substring(0, 8),
+                String.format("%.1f", proj.projDist),
+                chosen.getId().toString().substring(0, 8),
+                String.format("%.1f", costFrom),
+                String.format("%.1f", costTo));
+
+            return chosen;
+        }
+
+        // 모든 엣지가 연결 안 됨 - 최후 폴백으로 nearest node
+        return pathNodeRepository.findNearestNodeOnFloor(floorId, userX, userY, 0.0)
+            .orElseThrow(() -> new BusinessException(ErrorCode.NO_PATH_AVAILABLE,
+                "No connected path found from current position to destination"));
+    }
+
+    private double totalPathDistance(List<PathNode> path) {
+        double total = 0;
+        for (int i = 0; i < path.size() - 1; i++) {
+            total += path.get(i).distanceTo(path.get(i + 1));
+        }
+        return total;
+    }
+
     private PathfindingResponse buildAlreadyAtDestinationResponse(
             PathfindingRequest request, PathNode node) {
         double snapDistance = node.distanceTo(
@@ -94,7 +184,6 @@ public class PathfindingService {
 
         List<PathStep> steps = new ArrayList<>();
 
-        // 사용자 실제 위치 스텝
         if (snapDistance > 0.1) {
             steps.add(new PathStep(
                 1,
@@ -123,11 +212,10 @@ public class PathfindingService {
 
         PathNode firstNode = path.get(0);
 
-        // 사용자 실제 위치 → 첫 노드 간 보정 거리 추가
         double snapDistance = firstNode.distanceTo(
             request.startX(), request.startY(), request.getStartZOrDefault());
 
-        if (snapDistance > 0.1) { // 10cm 이상 차이날 때만 보정 스텝 추가
+        if (snapDistance > 0.1) {
             totalDistance += snapDistance;
             steps.add(new PathStep(
                 stepNumber++,
@@ -137,13 +225,11 @@ public class PathfindingService {
             ));
         }
 
-        // 기존 경로 스텝 생성
         PathNode previousNode = null;
         for (PathNode node : path) {
             if (previousNode != null) {
                 totalDistance += previousNode.distanceTo(node);
 
-                // Check for floor transition
                 if (!previousNode.getFloor().getId().equals(node.getFloor().getId())) {
                     String passageType = determinePassageType(previousNode, node);
                     transitions.add(new FloorTransition(
@@ -171,17 +257,24 @@ public class PathfindingService {
     }
 
     private String determinePassageType(PathNode from, PathNode to) {
-        if (from.getType() == NodeType.PASSAGE_ENTRY || from.getType() == NodeType.PASSAGE_EXIT) {
-            if (from.getVerticalPassage() != null) {
-                return from.getVerticalPassage().getType().name();
+        List<PathEdge> edges = pathEdgeRepository.findByNodePair(from.getId(), to.getId());
+        for (PathEdge edge : edges) {
+            if (edge.getEdgeType() == EdgeType.VERTICAL_ELEVATOR) {
+                return "ELEVATOR";
+            }
+            if (edge.getEdgeType() == EdgeType.VERTICAL_STAIRCASE) {
+                return "STAIRCASE";
             }
         }
-        if (to.getType() == NodeType.PASSAGE_ENTRY || to.getType() == NodeType.PASSAGE_EXIT) {
-            if (to.getVerticalPassage() != null) {
-                return to.getVerticalPassage().getType().name();
-            }
+
+        if (from.getVerticalPassage() != null) {
+            return from.getVerticalPassage().getType().name();
         }
-        return "UNKNOWN";
+        if (to.getVerticalPassage() != null) {
+            return to.getVerticalPassage().getType().name();
+        }
+
+        return "STAIRCASE";
     }
 
     private String generateInstruction(PathNode previous, PathNode current, List<PathNode> path) {
@@ -189,7 +282,6 @@ public class PathfindingService {
             return "출발";
         }
 
-        // Check for floor change
         if (!previous.getFloor().getId().equals(current.getFloor().getId())) {
             String passageType = determinePassageType(previous, current);
             int fromLevel = previous.getFloor().getLevel();
@@ -202,12 +294,10 @@ public class PathfindingService {
             }
         }
 
-        // Check if destination
         if (current.getPoiName() != null) {
             return "목적지 '" + current.getPoiName() + "' 도착";
         }
 
-        // Calculate distance and direction
         double distance = previous.distanceTo(current);
         String direction = calculateDirection(previous, current);
 

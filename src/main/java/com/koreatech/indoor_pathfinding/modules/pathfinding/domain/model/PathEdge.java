@@ -39,6 +39,10 @@ public class PathEdge extends BaseEntity {
     @Builder.Default
     private Boolean isBidirectional = true;
 
+    public void recalculateDistance() {
+        this.distance = fromNode.distanceTo(toNode);
+    }
+
     public double getWeightedDistance(PathPreference preference) {
         return switch (preference) {
             case SHORTEST -> distance;

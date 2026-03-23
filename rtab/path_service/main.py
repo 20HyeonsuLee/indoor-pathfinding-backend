@@ -56,7 +56,7 @@ import numpy as np
 from services.extraction import extract_trajectory_from_db, get_trajectory_stats
 from services.vertical_detector import detect_stairs_first, separate_floors, assign_floors_to_stairs
 from services.junction_detection import get_graph_stats, merge_floor_graphs
-from services.pointcloud_graph import build_pointcloud_graph
+from services.pointcloud_graph import build_pointcloud_graph, extract_visualization_ply
 
 
 # =============================================================================
@@ -79,6 +79,10 @@ tags_metadata = [
     {
         "name": "Preview",
         "description": "처리 결과 미리보기 이미지",
+    },
+    {
+        "name": "Pointcloud",
+        "description": "시각화용 포인트클라우드 PLY 추출 및 조회",
     },
 ]
 
@@ -127,10 +131,12 @@ app.add_middleware(
 # 환경 변수에서 디렉토리 경로 로드
 UPLOAD_DIR = os.getenv("UPLOAD_DIR", "./uploads")
 OUTPUT_DIR = os.getenv("OUTPUT_DIR", "./output")
+PLY_CACHE_DIR = os.getenv("PLY_CACHE_DIR", "./ply_cache")
 
 # 디렉토리 생성 (없으면)
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+os.makedirs(PLY_CACHE_DIR, exist_ok=True)
 
 # 작업 저장소 (메모리 기반 - 프로덕션에서는 Redis 등 사용 권장)
 processing_jobs: Dict[str, "ProcessingJob"] = {}
@@ -818,6 +824,87 @@ async def get_preview_image(job_id: str, image_type: str):
         )
 
     return FileResponse(image_path, media_type="image/png")
+
+
+# =============================================================================
+# 포인트클라우드 PLY (시각화용)
+# =============================================================================
+
+class PlyExtractRequest(BaseModel):
+    """PLY 추출 요청 모델 - 공유 볼륨의 .db 파일 경로를 직접 전달"""
+    db_path: str
+
+
+@app.post("/api/v1/pointcloud/extract", tags=["Pointcloud"],
+          summary="시각화용 PLY 추출 (경로 기반)",
+          responses={404: {"description": "파일을 찾을 수 없음"}})
+async def extract_pointcloud_ply(request: PlyExtractRequest):
+    """
+    공유 볼륨의 .db 파일에서 시각화용 경량 PLY를 추출한다.
+
+    db_path를 해시하여 캐시 키로 사용하므로, 같은 파일은 1회만 추출된다.
+    (voxel 0.2m, xyz+rgb만 포함)
+    """
+    import hashlib
+
+    db_path = request.db_path
+    if not os.path.exists(db_path):
+        raise HTTPException(status_code=404, detail=f"파일을 찾을 수 없습니다: {db_path}")
+
+    # 파일 경로를 해시하여 캐시 키 생성
+    cache_key = hashlib.md5(db_path.encode()).hexdigest()
+    ply_path = os.path.join(PLY_CACHE_DIR, f"{cache_key}.ply")
+
+    # 이미 추출된 파일이 있으면 스킵
+    if os.path.exists(ply_path):
+        file_size = os.path.getsize(ply_path)
+        return {
+            "cache_key": cache_key,
+            "status": "CACHED",
+            "ply_path": ply_path,
+            "size_bytes": file_size,
+            "size_mb": round(file_size / (1024 * 1024), 2),
+        }
+
+    # PLY 추출 (동기, 10~30초 소요)
+    try:
+        await asyncio.to_thread(extract_visualization_ply, db_path, ply_path)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"PLY 추출 실패: {str(e)}")
+
+    file_size = os.path.getsize(ply_path)
+    return {
+        "cache_key": cache_key,
+        "status": "CREATED",
+        "ply_path": ply_path,
+        "size_bytes": file_size,
+        "size_mb": round(file_size / (1024 * 1024), 2),
+    }
+
+
+@app.get("/api/v1/pointcloud/{cache_key}/ply", tags=["Pointcloud"],
+         summary="PLY 파일 다운로드",
+         responses={404: {"description": "PLY 파일이 없음 (먼저 extract 호출 필요)"}})
+async def get_pointcloud_ply(cache_key: str):
+    """
+    캐시된 PLY 파일을 다운로드한다.
+
+    먼저 /extract 엔드포인트를 호출하여 PLY를 생성해야 한다.
+    """
+    ply_path = os.path.join(PLY_CACHE_DIR, f"{cache_key}.ply")
+
+    if not os.path.exists(ply_path):
+        raise HTTPException(
+            status_code=404,
+            detail="PLY 파일이 없습니다. 먼저 /extract를 호출하세요."
+        )
+
+    return FileResponse(
+        ply_path,
+        media_type="application/octet-stream",
+        filename=f"{cache_key}.ply",
+        headers={"Content-Encoding": "identity"},
+    )
 
 
 # =============================================================================

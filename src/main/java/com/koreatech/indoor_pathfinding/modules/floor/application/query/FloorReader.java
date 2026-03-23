@@ -53,9 +53,12 @@ public class FloorReader {
     }
 
     public FloorPathResponse findPathByFloorId(UUID floorId) {
-        FloorPath floorPath = floorPathRepository.findByFloorIdWithSegments(floorId)
-            .orElseThrow(() -> new BusinessException(ErrorCode.PATH_NOT_FOUND));
-
-        return FloorPathResponse.from(floorPath);
+        return floorPathRepository.findByFloorIdWithSegments(floorId)
+            .map(FloorPathResponse::from)
+            .orElse(new FloorPathResponse(
+                floorId, 0.0,
+                new FloorPathResponse.BoundsResponse(0.0, 0.0, 0.0, 0.0),
+                List.of()
+            ));
     }
 }

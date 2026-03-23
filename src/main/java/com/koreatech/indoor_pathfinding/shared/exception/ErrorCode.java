@@ -38,6 +38,8 @@ public enum ErrorCode {
     GRAPH_NOT_BUILT(HttpStatus.BAD_REQUEST, "PF003", "Graph not built for this building"),
     DESTINATION_NOT_FOUND(HttpStatus.NOT_FOUND, "PF004", "Destination not found"),
     NO_PATH_AVAILABLE(HttpStatus.NOT_FOUND, "PF005", "No path available between the specified points"),
+    EDGE_NOT_FOUND(HttpStatus.NOT_FOUND, "PF006", "Edge not found"),
+    DUPLICATE_EDGE(HttpStatus.CONFLICT, "PF007", "Edge already exists between these nodes"),
 
     // VPS
     VPS_SERVICE_ERROR(HttpStatus.SERVICE_UNAVAILABLE, "V001", "VPS service error"),

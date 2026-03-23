@@ -154,6 +154,43 @@ public class PathProcessingClient {
             );
     }
 
+    /**
+     * 공유 볼륨의 .db 파일 경로를 전달하여 PLY 추출을 요청한다.
+     * 반환값: cache_key (PLY 다운로드에 사용)
+     */
+    public String extractPointcloudPly(String dbPath) {
+        log.info("Requesting PLY extraction for path: {}", dbPath);
+        try {
+            Map<String, Object> response = webClient.post()
+                .uri("/api/v1/pointcloud/extract")
+                .bodyValue(Map.of("db_path", dbPath))
+                .retrieve()
+                .bodyToMono(Map.class)
+                .block();
+
+            String cacheKey = (String) response.get("cache_key");
+            log.info("PLY extraction completed, cache_key: {}", cacheKey);
+            return cacheKey;
+        } catch (WebClientResponseException e) {
+            log.warn("PLY extraction failed: {}", e.getMessage());
+            throw new BusinessException(ErrorCode.EXTERNAL_SERVICE_ERROR,
+                "PLY extraction failed: " + e.getMessage());
+        }
+    }
+
+    public byte[] getPointcloudPly(String cacheKey) {
+        try {
+            return webClient.get()
+                .uri("/api/v1/pointcloud/{cacheKey}/ply", cacheKey)
+                .retrieve()
+                .bodyToMono(byte[].class)
+                .block();
+        } catch (WebClientResponseException e) {
+            throw new BusinessException(ErrorCode.EXTERNAL_SERVICE_ERROR,
+                "Failed to get PLY file: " + e.getMessage());
+        }
+    }
+
     public boolean isHealthy() {
         try {
             Map<String, Object> response = webClient.get()
