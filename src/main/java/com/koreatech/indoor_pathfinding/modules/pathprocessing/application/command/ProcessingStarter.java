@@ -30,6 +30,8 @@ public class ProcessingStarter {
 
     private static final Map<String, UUID> jobToSessionMap = new ConcurrentHashMap<>();
     private static final Map<UUID, String> sessionToJobMap = new ConcurrentHashMap<>();
+    // uploadFile()이 반환한 fileId → Python 내부 경로 매핑
+    private static final Map<UUID, String> sessionToPythonFileId = new ConcurrentHashMap<>();
 
     @Transactional
     public ProcessingStartResponse start(UUID buildingId, UUID sessionId) {
@@ -40,13 +42,14 @@ public class ProcessingStarter {
                 "Scan session cannot be processed in current state: " + session.getStatus());
         }
 
-        // 1. Python 서비스에 파일 업로드
+        // 1. Python 서비스에 파일 업로드 → Python이 자체 UUID로 저장
         String fileId = pathProcessingClient.uploadFile(Paths.get(session.getFilePath()));
+        sessionToPythonFileId.put(sessionId, fileId);
 
-        // 2. PLY 추출 비동기 시작 (포인트클라우드 미리 준비)
-        extractPlyAsync(sessionId);
+        // 2. PLY 추출 비동기 시작 (Python이 저장한 파일 경로 사용)
+        extractPlyAsync(sessionId, fileId);
 
-        // 3. 처리 시작 (층 감지 + 경로 추출 — 그래프 자동 생성은 ResultApplier에서 건너뜀)
+        // 3. 처리 시작 (층 감지 — 그래프 자동 생성은 ResultApplier에서 건너뜀)
         String jobId = pathProcessingClient.startProcessing(fileId);
 
         scanStatusUpdater.updateStatus(sessionId, ScanStatus.EXTRACTING);
@@ -58,16 +61,14 @@ public class ProcessingStarter {
     }
 
     @Async
-    public void extractPlyAsync(UUID sessionId) {
+    public void extractPlyAsync(UUID sessionId, String pythonFileId) {
         try {
-            ScanSession session = scanSessionReader.findEntityById(sessionId);
-            String springPath = Paths.get(session.getFilePath()).toAbsolutePath().toString();
-            String pythonPath = springPath.replace("/app/storage/uploads/", "/app/uploads/");
+            // Python 컨테이너 내부 경로: /app/uploads/{pythonFileId}.db
+            String pythonPath = "/app/uploads/" + pythonFileId + ".db";
 
-            log.info("PLY extraction started for session {}", sessionId);
+            log.info("PLY extraction started: session={}, pythonPath={}", sessionId, pythonPath);
             String cacheKey = pathProcessingClient.extractPointcloudPly(pythonPath);
-            session.updatePlyFileId(cacheKey);
-            log.info("PLY extraction completed: {}", cacheKey);
+            scanStatusUpdater.updatePlyFileId(sessionId, cacheKey);
         } catch (Exception e) {
             log.warn("PLY extraction failed (will retry on demand): {}", e.getMessage());
         }
@@ -79,6 +80,10 @@ public class ProcessingStarter {
 
     public static UUID getSessionIdForJob(String jobId) {
         return jobToSessionMap.get(jobId);
+    }
+
+    public static String getPythonFileIdForSession(UUID sessionId) {
+        return sessionToPythonFileId.get(sessionId);
     }
 
     private boolean canStartProcessing(ScanStatus status) {

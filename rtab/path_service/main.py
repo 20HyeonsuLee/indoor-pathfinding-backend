@@ -230,6 +230,24 @@ class ProcessingResultResponse(BaseModel):
 # 헬스 체크
 # =============================================================================
 
+@app.get("/debug/storage", tags=["System"], summary="스토리지 상태 확인")
+async def debug_storage():
+    """업로드/PLY 캐시 디렉토리 내 파일 목록"""
+    result = {}
+    for name, path in [("uploads", UPLOAD_DIR), ("ply_cache", PLY_CACHE_DIR), ("output", OUTPUT_DIR)]:
+        try:
+            files = os.listdir(path)
+            result[name] = {
+                "path": os.path.abspath(path),
+                "files": [{"name": f, "size_mb": round(os.path.getsize(os.path.join(path, f)) / 1024 / 1024, 2)}
+                          for f in files[:20]],
+                "total": len(files),
+            }
+        except Exception as e:
+            result[name] = {"path": path, "error": str(e)}
+    return result
+
+
 @app.get("/health", tags=["System"], summary="서비스 상태 확인")
 async def health_check():
     """

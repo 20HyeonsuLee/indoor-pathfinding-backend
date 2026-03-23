@@ -3,6 +3,7 @@ package com.koreatech.indoor_pathfinding.modules.scan.interfaces.controller;
 import com.koreatech.indoor_pathfinding.modules.pathprocessing.infrastructure.external.PathProcessingClient;
 import com.koreatech.indoor_pathfinding.modules.scan.interfaces.ScanApi;
 import com.koreatech.indoor_pathfinding.modules.scan.application.command.ScanFileUploader;
+import com.koreatech.indoor_pathfinding.modules.scan.application.command.ScanStatusUpdater;
 import com.koreatech.indoor_pathfinding.modules.scan.application.dto.response.ScanSessionResponse;
 import com.koreatech.indoor_pathfinding.modules.scan.application.query.ScanSessionReader;
 import com.koreatech.indoor_pathfinding.modules.scan.domain.model.ScanSession;
@@ -28,7 +29,9 @@ public class ScanController implements ScanApi {
 
     private final ScanFileUploader scanFileUploader;
     private final ScanSessionReader scanSessionReader;
+    private final ScanStatusUpdater scanStatusUpdater;
     private final PathProcessingClient pathProcessingClient;
+    private final com.koreatech.indoor_pathfinding.modules.pathprocessing.application.command.ProcessingStarter processingStarter;
 
     @PostMapping
     public ResponseEntity<ScanSessionResponse> uploadScanFile(
@@ -73,11 +76,19 @@ public class ScanController implements ScanApi {
 
         if (plyData == null) {
             log.info("Extracting PLY on demand for session {}", sessionId);
-            // Spring Boot: /app/storage/uploads/xxx.db → Python: /app/uploads/xxx.db
-            String springPath = java.nio.file.Paths.get(session.getFilePath()).toAbsolutePath().toString();
-            String pythonPath = springPath.replace("/app/storage/uploads/", "/app/uploads/");
+
+            // Python에 업로드된 파일 ID 확인, 없으면 새로 업로드
+            String pythonFileId = com.koreatech.indoor_pathfinding.modules.pathprocessing.application.command
+                .ProcessingStarter.getPythonFileIdForSession(sessionId);
+
+            if (pythonFileId == null) {
+                pythonFileId = pathProcessingClient.uploadFile(
+                    java.nio.file.Paths.get(session.getFilePath()));
+            }
+
+            String pythonPath = "/app/uploads/" + pythonFileId + ".db";
             cacheKey = pathProcessingClient.extractPointcloudPly(pythonPath);
-            session.updatePlyFileId(cacheKey);
+            scanStatusUpdater.updatePlyFileId(sessionId, cacheKey);
             plyData = pathProcessingClient.getPointcloudPly(cacheKey);
         }
 

@@ -30,6 +30,14 @@ public class ScanStatusUpdater {
         return ScanSessionResponse.from(session);
     }
 
+    public void updatePlyFileId(UUID sessionId, String plyFileId) {
+        ScanSession session = scanSessionRepository.findById(sessionId)
+            .orElseThrow(() -> new BusinessException(ErrorCode.SCAN_SESSION_NOT_FOUND));
+
+        session.updatePlyFileId(plyFileId);
+        log.info("Updated plyFileId for session {}: {}", sessionId, plyFileId);
+    }
+
     public ScanSessionResponse setError(UUID sessionId, String errorMessage) {
         ScanSession session = scanSessionRepository.findById(sessionId)
             .orElseThrow(() -> new BusinessException(ErrorCode.SCAN_SESSION_NOT_FOUND));
