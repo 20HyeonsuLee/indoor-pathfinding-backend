@@ -10,7 +10,6 @@ import com.koreatech.indoor_pathfinding.modules.floor.domain.repository.FloorRep
 import com.koreatech.indoor_pathfinding.modules.passage.domain.model.PassageType;
 import com.koreatech.indoor_pathfinding.modules.passage.domain.model.VerticalPassage;
 import com.koreatech.indoor_pathfinding.modules.passage.domain.repository.VerticalPassageRepository;
-import com.koreatech.indoor_pathfinding.modules.pathfinding.application.command.GraphBuilder;
 import com.koreatech.indoor_pathfinding.modules.pathprocessing.application.dto.response.ProcessingStatusResponse;
 import com.koreatech.indoor_pathfinding.modules.pathprocessing.domain.model.PathSegment;
 import com.koreatech.indoor_pathfinding.modules.pathprocessing.domain.model.Point3D;
@@ -42,8 +41,6 @@ public class ProcessingResultApplier {
     private final FloorRepository floorRepository;
     private final FloorPathRepository floorPathRepository;
     private final VerticalPassageRepository verticalPassageRepository;
-    private final GraphBuilder graphBuilder;
-
     public void apply(UUID sessionId) {
         log.info("Applying processing result for session: {}", sessionId);
 
@@ -93,9 +90,50 @@ public class ProcessingResultApplier {
         buildingRepository.save(building);
 
         // 그래프 자동 생성 건너뜀 — 수동 노드 배치로 전환
-        // graphBuilder.buildGraphForBuilding(building.getId());
 
         log.info("Applied processing result for session: {} (floors created, graph skipped)", sessionId);
+    }
+
+    /**
+     * 전체 PLY에서 층별 PLY를 추출한다.
+     * apply() 이후 트랜잭션 내에서 호출하여 세그먼트 lazy 로딩이 가능하도록 한다.
+     */
+    public void extractFloorPlys(UUID buildingId, String wholePlyKey) {
+        List<Floor> floors = floorRepository.findByBuildingIdOrderByLevelAsc(buildingId);
+        log.info("Extracting per-floor PLY for {} floors (wholePly={})", floors.size(), wholePlyKey);
+
+        for (Floor floor : floors) {
+            try {
+                double minZ = Double.MAX_VALUE;
+                double maxZ = -Double.MAX_VALUE;
+
+                if (floor.getFloorPath() != null) {
+                    for (PathSegment seg : floor.getFloorPath().getSegments()) {
+                        minZ = Math.min(minZ, Math.min(seg.getStartPoint().getZ(), seg.getEndPoint().getZ()));
+                        maxZ = Math.max(maxZ, Math.max(seg.getStartPoint().getZ(), seg.getEndPoint().getZ()));
+                    }
+                }
+
+                if (minZ == Double.MAX_VALUE) {
+                    double h = floor.getHeight() != null ? floor.getHeight() : 3.0;
+                    minZ = (floor.getLevel() - 1) * h;
+                    maxZ = floor.getLevel() * h;
+                }
+
+                minZ -= 0.5;
+                maxZ += 1.5;
+
+                String key = pathProcessingClient.extractFloorPly(wholePlyKey, minZ, maxZ);
+                floor.updatePlyFileId(key);
+                floorRepository.save(floor);
+
+                log.info("  Floor {} (L{}) PLY: z=[{},{}] key={}",
+                    floor.getName(), floor.getLevel(),
+                    String.format("%.1f", minZ), String.format("%.1f", maxZ), key);
+            } catch (Exception e) {
+                log.warn("  Floor {} PLY failed: {}", floor.getName(), e.getMessage());
+            }
+        }
     }
 
     private void applyFloorPath(Building building, Map<String, Object> floorPathData) {
@@ -150,14 +188,20 @@ public class ProcessingResultApplier {
         int fromFloorLevel = ((Number) passageData.get("from_floor_level")).intValue();
         int toFloorLevel = ((Number) passageData.get("to_floor_level")).intValue();
 
-        // Find floors
+        // Find or create floors
         Floor fromFloor = floorRepository.findByBuildingIdAndLevel(building.getId(), fromFloorLevel)
-            .orElseThrow(() -> new BusinessException(ErrorCode.FLOOR_NOT_FOUND,
-                "From floor not found: " + fromFloorLevel));
+            .orElseGet(() -> {
+                Floor f = Floor.builder().name(fromFloorLevel + "층").level(fromFloorLevel).build();
+                building.addFloor(f);
+                return floorRepository.save(f);
+            });
 
         Floor toFloor = floorRepository.findByBuildingIdAndLevel(building.getId(), toFloorLevel)
-            .orElseThrow(() -> new BusinessException(ErrorCode.FLOOR_NOT_FOUND,
-                "To floor not found: " + toFloorLevel));
+            .orElseGet(() -> {
+                Floor f = Floor.builder().name(toFloorLevel + "층").level(toFloorLevel).build();
+                building.addFloor(f);
+                return floorRepository.save(f);
+            });
 
         // Create vertical passage
         VerticalPassage passage = VerticalPassage.builder()

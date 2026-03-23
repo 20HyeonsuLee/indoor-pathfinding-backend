@@ -849,23 +849,29 @@ async def get_preview_image(job_id: str, image_type: str):
 # =============================================================================
 
 class PlyExtractRequest(BaseModel):
-    """PLY 추출 요청 모델 - 공유 볼륨의 .db 파일 경로를 직접 전달"""
-    db_path: str
+    """PLY 추출 요청 - db_path 직접 지정 또는 file_id로 UPLOAD_DIR 내 파일 참조"""
+    db_path: Optional[str] = None
+    file_id: Optional[str] = None
 
 
 @app.post("/api/v1/pointcloud/extract", tags=["Pointcloud"],
-          summary="시각화용 PLY 추출 (경로 기반)",
+          summary="시각화용 PLY 추출",
           responses={404: {"description": "파일을 찾을 수 없음"}})
 async def extract_pointcloud_ply(request: PlyExtractRequest):
     """
-    공유 볼륨의 .db 파일에서 시각화용 경량 PLY를 추출한다.
-
-    db_path를 해시하여 캐시 키로 사용하므로, 같은 파일은 1회만 추출된다.
-    (voxel 0.2m, xyz+rgb만 포함)
+    .db 파일에서 시각화용 경량 PLY를 추출한다.
+    file_id 또는 db_path 중 하나를 지정한다.
     """
     import hashlib
 
-    db_path = request.db_path
+    # file_id가 있으면 UPLOAD_DIR에서 찾기
+    if request.file_id:
+        db_path = os.path.join(UPLOAD_DIR, f"{request.file_id}.db")
+    elif request.db_path:
+        db_path = request.db_path
+    else:
+        raise HTTPException(status_code=400, detail="file_id 또는 db_path가 필요합니다.")
+
     if not os.path.exists(db_path):
         raise HTTPException(status_code=404, detail=f"파일을 찾을 수 없습니다: {db_path}")
 
@@ -923,6 +929,83 @@ async def get_pointcloud_ply(cache_key: str):
         filename=f"{cache_key}.ply",
         headers={"Content-Encoding": "identity"},
     )
+
+
+class FloorPlyRequest(BaseModel):
+    """층별 PLY 추출 요청"""
+    source_cache_key: str  # 전체 PLY의 cache_key
+    min_z: float           # API 좌표 Z 최소 (높이)
+    max_z: float           # API 좌표 Z 최대
+
+
+@app.post("/api/v1/pointcloud/extract-floor", tags=["Pointcloud"],
+          summary="전체 PLY에서 층별 PLY 추출 (Z 범위 필터링)")
+async def extract_floor_ply(request: FloorPlyRequest):
+    """
+    이미 추출된 전체 PLY에서 Z 범위로 필터링하여 층별 PLY를 생성한다.
+    """
+    import hashlib, struct
+
+    source_path = os.path.join(PLY_CACHE_DIR, f"{request.source_cache_key}.ply")
+    if not os.path.exists(source_path):
+        raise HTTPException(status_code=404, detail="원본 PLY가 없습니다. 먼저 /extract를 호출하세요.")
+
+    # 층 범위를 포함한 캐시 키
+    floor_key = hashlib.md5(
+        f"{request.source_cache_key}_{request.min_z}_{request.max_z}".encode()
+    ).hexdigest()
+    floor_ply_path = os.path.join(PLY_CACHE_DIR, f"{floor_key}.ply")
+
+    if os.path.exists(floor_ply_path):
+        return {"cache_key": floor_key, "status": "CACHED",
+                "size_mb": round(os.path.getsize(floor_ply_path) / 1024 / 1024, 2)}
+
+    # 원본 PLY 읽기 (binary_little_endian, xyz+rgb = 15 bytes/point)
+    with open(source_path, 'rb') as f:
+        n_vertices = 0
+        while True:
+            line = f.readline().decode('ascii', errors='ignore').strip()
+            if line.startswith('element vertex'):
+                n_vertices = int(line.split()[-1])
+            if line == 'end_header':
+                break
+        data = f.read()
+
+    # Z 범위 필터링 (PLY의 z = API의 z = 높이)
+    point_size = 15  # 3*float32 + 3*uint8
+    filtered = bytearray()
+    count = 0
+
+    for i in range(n_vertices):
+        offset = i * point_size
+        x, y, z = struct.unpack_from('<fff', data, offset)
+        # PLY의 z가 API의 z (높이)
+        if request.min_z <= z <= request.max_z:
+            filtered.extend(data[offset:offset + point_size])
+            count += 1
+
+    # 필터링된 PLY 저장
+    header = (
+        "ply\n"
+        "format binary_little_endian 1.0\n"
+        f"element vertex {count}\n"
+        "property float x\n"
+        "property float y\n"
+        "property float z\n"
+        "property uchar red\n"
+        "property uchar green\n"
+        "property uchar blue\n"
+        "end_header\n"
+    )
+
+    with open(floor_ply_path, 'wb') as f:
+        f.write(header.encode('ascii'))
+        f.write(bytes(filtered))
+
+    size_mb = round(os.path.getsize(floor_ply_path) / 1024 / 1024, 2)
+    print(f"  층별 PLY: {count:,}개 포인트 ({size_mb}MB), Z=[{request.min_z:.1f}, {request.max_z:.1f}]")
+
+    return {"cache_key": floor_key, "status": "CREATED", "point_count": count, "size_mb": size_mb}
 
 
 # =============================================================================

@@ -9,15 +9,21 @@ import com.koreatech.indoor_pathfinding.modules.floor.application.dto.request.Fl
 import com.koreatech.indoor_pathfinding.modules.floor.application.dto.response.FloorPathResponse;
 import com.koreatech.indoor_pathfinding.modules.floor.application.dto.response.FloorResponse;
 import com.koreatech.indoor_pathfinding.modules.floor.application.query.FloorReader;
+import com.koreatech.indoor_pathfinding.modules.floor.domain.model.Floor;
+import com.koreatech.indoor_pathfinding.modules.floor.domain.repository.FloorRepository;
+import com.koreatech.indoor_pathfinding.modules.pathprocessing.infrastructure.external.PathProcessingClient;
+import com.koreatech.indoor_pathfinding.shared.exception.BusinessException;
+import com.koreatech.indoor_pathfinding.shared.exception.ErrorCode;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
-import org.springframework.http.HttpStatus;
-import org.springframework.http.ResponseEntity;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.*;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
 import java.util.UUID;
 
+@Slf4j
 @RestController
 @RequiredArgsConstructor
 public class FloorController implements FloorApi {
@@ -26,6 +32,8 @@ public class FloorController implements FloorApi {
     private final FloorUpdater floorUpdater;
     private final FloorDeleter floorDeleter;
     private final FloorReader floorReader;
+    private final FloorRepository floorRepository;
+    private final PathProcessingClient pathProcessingClient;
 
     @PostMapping("/api/v1/buildings/{buildingId}/floors")
     public ResponseEntity<FloorResponse> addFloor(
@@ -67,5 +75,26 @@ public class FloorController implements FloorApi {
     public ResponseEntity<FloorPathResponse> getFloorPath(@PathVariable UUID floorId) {
         FloorPathResponse response = floorReader.findPathByFloorId(floorId);
         return ResponseEntity.ok(response);
+    }
+
+    // 층별 PLY 다운로드
+    @GetMapping("/api/v1/floors/{floorId}/pointcloud")
+    public ResponseEntity<byte[]> getFloorPointcloud(@PathVariable UUID floorId) {
+        Floor floor = floorRepository.findById(floorId)
+            .orElseThrow(() -> new BusinessException(ErrorCode.FLOOR_NOT_FOUND));
+
+        String cacheKey = floor.getPlyFileId();
+        if (cacheKey == null) {
+            throw new BusinessException(ErrorCode.EXTERNAL_SERVICE_ERROR,
+                "이 층의 포인트클라우드가 아직 생성되지 않았습니다.");
+        }
+
+        byte[] plyData = pathProcessingClient.getPointcloudPly(cacheKey);
+
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_OCTET_STREAM);
+        headers.setContentDispositionFormData("attachment", floorId + ".ply");
+
+        return new ResponseEntity<>(plyData, headers, HttpStatus.OK);
     }
 }

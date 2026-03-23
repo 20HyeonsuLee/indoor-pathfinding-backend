@@ -2,6 +2,7 @@ package com.koreatech.indoor_pathfinding.modules.pathfinding.application.command
 
 import com.koreatech.indoor_pathfinding.modules.pathfinding.application.dto.request.EdgeCreateRequest;
 import com.koreatech.indoor_pathfinding.modules.pathfinding.application.dto.response.PathEdgeResponse;
+import com.koreatech.indoor_pathfinding.modules.pathfinding.domain.model.EdgeType;
 import com.koreatech.indoor_pathfinding.modules.pathfinding.domain.model.PathEdge;
 import com.koreatech.indoor_pathfinding.modules.pathfinding.domain.model.PathNode;
 import com.koreatech.indoor_pathfinding.modules.pathfinding.domain.repository.PathEdgeRepository;
@@ -33,7 +34,14 @@ public class EdgeManager {
             .orElseThrow(() -> new BusinessException(ErrorCode.NODE_NOT_FOUND,
                 "To node not found: " + request.toNodeId()));
 
-        if (!pathEdgeRepository.findByNodePair(request.fromNodeId(), request.toNodeId()).isEmpty()) {
+        EdgeType edgeType = request.edgeTypeOrDefault();
+
+        // 같은 타입의 엣지만 중복 체크 (수직/수평 엣지는 같은 노드 쌍에 공존 가능)
+        boolean duplicate = pathEdgeRepository.findByNodePair(request.fromNodeId(), request.toNodeId())
+            .stream()
+            .anyMatch(e -> e.getEdgeType() == edgeType);
+
+        if (duplicate) {
             throw new BusinessException(ErrorCode.DUPLICATE_EDGE);
         }
 
@@ -43,13 +51,13 @@ public class EdgeManager {
             .fromNode(fromNode)
             .toNode(toNode)
             .distance(distance)
-            .edgeType(request.edgeTypeOrDefault())
+            .edgeType(edgeType)
             .isBidirectional(request.bidirectionalOrDefault())
             .build();
 
         PathEdge saved = pathEdgeRepository.save(edge);
-        log.info("Created edge {} -> {} (distance: {}m)", request.fromNodeId(), request.toNodeId(),
-            String.format("%.2f", distance));
+        log.info("Created edge {} -> {} (type={}, distance={}m)",
+            request.fromNodeId(), request.toNodeId(), edgeType, String.format("%.2f", distance));
 
         return PathEdgeResponse.from(saved);
     }

@@ -77,7 +77,7 @@ public class ScanController implements ScanApi {
         if (plyData == null) {
             log.info("Extracting PLY on demand for session {}", sessionId);
 
-            // Python에 업로드된 파일 ID 확인, 없으면 새로 업로드
+            // Python에 업로드된 파일 ID로 PLY 추출
             String pythonFileId = com.koreatech.indoor_pathfinding.modules.pathprocessing.application.command
                 .ProcessingStarter.getPythonFileIdForSession(sessionId);
 
@@ -86,8 +86,7 @@ public class ScanController implements ScanApi {
                     java.nio.file.Paths.get(session.getFilePath()));
             }
 
-            String pythonPath = "/app/uploads/" + pythonFileId + ".db";
-            cacheKey = pathProcessingClient.extractPointcloudPly(pythonPath);
+            cacheKey = pathProcessingClient.extractPointcloudPly(pythonFileId);
             scanStatusUpdater.updatePlyFileId(sessionId, cacheKey);
             plyData = pathProcessingClient.getPointcloudPly(cacheKey);
         }

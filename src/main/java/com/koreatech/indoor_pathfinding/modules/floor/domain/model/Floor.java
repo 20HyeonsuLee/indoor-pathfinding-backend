@@ -28,6 +28,9 @@ public class Floor extends BaseEntity {
     @Column
     private Double height;
 
+    @Column(name = "ply_file_id")
+    private String plyFileId;
+
     @OneToOne(mappedBy = "floor", cascade = CascadeType.ALL, orphanRemoval = true)
     private FloorPath floorPath;
 
@@ -45,5 +48,9 @@ public class Floor extends BaseEntity {
     public void updateInfo(String name, Double height) {
         if (name != null) this.name = name;
         if (height != null) this.height = height;
+    }
+
+    public void updatePlyFileId(String plyFileId) {
+        this.plyFileId = plyFileId;
     }
 }

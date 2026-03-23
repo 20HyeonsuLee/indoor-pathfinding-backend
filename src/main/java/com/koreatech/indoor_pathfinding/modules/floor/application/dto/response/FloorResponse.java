@@ -9,7 +9,8 @@ public record FloorResponse(
     String name,
     int level,
     Double height,
-    boolean hasPath
+    boolean hasPath,
+    boolean hasPly
 ) {
     public static FloorResponse from(Floor floor) {
         return new FloorResponse(
@@ -17,7 +18,8 @@ public record FloorResponse(
             floor.getName(),
             floor.getLevel(),
             floor.getHeight(),
-            floor.getFloorPath() != null
+            floor.getFloorPath() != null,
+            floor.getPlyFileId() != null
         );
     }
 }
