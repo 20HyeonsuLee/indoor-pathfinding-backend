@@ -15,7 +15,9 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.nio.file.Paths;
+import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 @Slf4j
 @Service
@@ -26,6 +28,9 @@ public class ProcessingStarter {
     private final ScanSessionReader scanSessionReader;
     private final ScanStatusUpdater scanStatusUpdater;
 
+    private static final Map<String, UUID> jobToSessionMap = new ConcurrentHashMap<>();
+    private static final Map<UUID, String> sessionToJobMap = new ConcurrentHashMap<>();
+
     @Transactional
     public ProcessingStartResponse start(UUID buildingId, UUID sessionId) {
         ScanSession session = scanSessionReader.findEntityById(sessionId);
@@ -35,12 +40,21 @@ public class ProcessingStarter {
                 "Scan session cannot be processed in current state: " + session.getStatus());
         }
 
-        scanStatusUpdater.updateStatus(sessionId, ScanStatus.PROCESSING);
+        // 1. Python 서비스에 파일 업로드
+        String fileId = pathProcessingClient.uploadFile(Paths.get(session.getFilePath()));
 
-        // PLY 추출을 비동기로 시작 (사용자가 포인트클라우드 볼 때 바로 보이도록)
+        // 2. PLY 추출 비동기 시작 (포인트클라우드 미리 준비)
         extractPlyAsync(sessionId);
 
-        return new ProcessingStartResponse(null, sessionId);
+        // 3. 처리 시작 (층 감지 + 경로 추출 — 그래프 자동 생성은 ResultApplier에서 건너뜀)
+        String jobId = pathProcessingClient.startProcessing(fileId);
+
+        scanStatusUpdater.updateStatus(sessionId, ScanStatus.EXTRACTING);
+
+        jobToSessionMap.put(jobId, sessionId);
+        sessionToJobMap.put(sessionId, jobId);
+
+        return new ProcessingStartResponse(jobId, sessionId);
     }
 
     @Async
@@ -52,23 +66,19 @@ public class ProcessingStarter {
 
             log.info("PLY extraction started for session {}", sessionId);
             String cacheKey = pathProcessingClient.extractPointcloudPly(pythonPath);
-
             session.updatePlyFileId(cacheKey);
-            scanStatusUpdater.updateStatus(sessionId, ScanStatus.COMPLETED);
-            log.info("PLY extraction completed for session {} (cache_key: {})", sessionId, cacheKey);
-
+            log.info("PLY extraction completed: {}", cacheKey);
         } catch (Exception e) {
-            log.error("PLY extraction failed for session {}: {}", sessionId, e.getMessage());
-            scanStatusUpdater.updateStatus(sessionId, ScanStatus.FAILED);
+            log.warn("PLY extraction failed (will retry on demand): {}", e.getMessage());
         }
     }
 
     public static String getJobIdForSession(UUID sessionId) {
-        return null;
+        return sessionToJobMap.get(sessionId);
     }
 
     public static UUID getSessionIdForJob(String jobId) {
-        return null;
+        return jobToSessionMap.get(jobId);
     }
 
     private boolean canStartProcessing(ScanStatus status) {

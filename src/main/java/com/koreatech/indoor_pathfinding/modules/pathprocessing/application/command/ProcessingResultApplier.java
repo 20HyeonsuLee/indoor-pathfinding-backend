@@ -92,10 +92,10 @@ public class ProcessingResultApplier {
         building.updateStatus(BuildingStatus.ACTIVE);
         buildingRepository.save(building);
 
-        // Build pathfinding graph
-        graphBuilder.buildGraphForBuilding(building.getId());
+        // 그래프 자동 생성 건너뜀 — 수동 노드 배치로 전환
+        // graphBuilder.buildGraphForBuilding(building.getId());
 
-        log.info("Applied processing result for session: {}", sessionId);
+        log.info("Applied processing result for session: {} (floors created, graph skipped)", sessionId);
     }
 
     private void applyFloorPath(Building building, Map<String, Object> floorPathData) {
