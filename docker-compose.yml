@@ -29,11 +29,14 @@ services:
     ports:
       - "8000:8000"
     volumes:
+      # Spring Boot와 동일한 uploads 경로로 통일
       - ${STORAGE_PATH:-./storage}/uploads:/app/uploads
       - ${STORAGE_PATH:-./storage}/output:/app/output
+      - ${STORAGE_PATH:-./storage}/ply_cache:/app/ply_cache
     environment:
       - UPLOAD_DIR=/app/uploads
       - OUTPUT_DIR=/app/output
+      - PLY_CACHE_DIR=/app/ply_cache
     depends_on:
       postgres:
         condition: service_healthy
@@ -50,9 +53,11 @@ services:
       - "8080:8080"
     volumes:
       - ${STORAGE_PATH:-./storage}/maps:/app/storage/maps
+      # uploads를 Python과 같은 호스트 디렉토리 공유
       - ${STORAGE_PATH:-./storage}/uploads:/app/storage/uploads
       - ${STORAGE_PATH:-./storage}/output:/app/storage/output
       - ${STORAGE_PATH:-./storage}/images:/app/storage/images
+      - ${STORAGE_PATH:-./storage}/ply_cache:/app/storage/ply_cache
     depends_on:
       postgres:
         condition: service_healthy

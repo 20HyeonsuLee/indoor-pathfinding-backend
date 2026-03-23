@@ -73,8 +73,10 @@ public class ScanController implements ScanApi {
 
         if (plyData == null) {
             log.info("Extracting PLY on demand for session {}", sessionId);
-            String absolutePath = java.nio.file.Paths.get(session.getFilePath()).toAbsolutePath().toString();
-            cacheKey = pathProcessingClient.extractPointcloudPly(absolutePath);
+            // Spring Boot: /app/storage/uploads/xxx.db → Python: /app/uploads/xxx.db
+            String springPath = java.nio.file.Paths.get(session.getFilePath()).toAbsolutePath().toString();
+            String pythonPath = springPath.replace("/app/storage/uploads/", "/app/uploads/");
+            cacheKey = pathProcessingClient.extractPointcloudPly(pythonPath);
             session.updatePlyFileId(cacheKey);
             plyData = pathProcessingClient.getPointcloudPly(cacheKey);
         }
