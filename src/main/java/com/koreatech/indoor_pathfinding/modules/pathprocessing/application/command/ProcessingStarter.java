@@ -10,27 +10,23 @@ import com.koreatech.indoor_pathfinding.shared.exception.BusinessException;
 import com.koreatech.indoor_pathfinding.shared.exception.ErrorCode;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.nio.file.Paths;
-import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
 
 @Slf4j
 @Service
 @RequiredArgsConstructor
-@Transactional
 public class ProcessingStarter {
 
     private final PathProcessingClient pathProcessingClient;
     private final ScanSessionReader scanSessionReader;
     private final ScanStatusUpdater scanStatusUpdater;
 
-    private static final Map<String, UUID> jobToSessionMap = new ConcurrentHashMap<>();
-    private static final Map<UUID, String> sessionToJobMap = new ConcurrentHashMap<>();
-
+    @Transactional
     public ProcessingStartResponse start(UUID buildingId, UUID sessionId) {
         ScanSession session = scanSessionReader.findEntityById(sessionId);
 
@@ -39,35 +35,40 @@ public class ProcessingStarter {
                 "Scan session cannot be processed in current state: " + session.getStatus());
         }
 
-        String fileId = pathProcessingClient.uploadFile(Paths.get(session.getFilePath()));
+        scanStatusUpdater.updateStatus(sessionId, ScanStatus.PROCESSING);
 
-        // PLY 추출 - Spring Boot 경로를 Python 컨테이너 경로로 변환
+        // PLY 추출을 비동기로 시작 (사용자가 포인트클라우드 볼 때 바로 보이도록)
+        extractPlyAsync(sessionId);
+
+        return new ProcessingStartResponse(null, sessionId);
+    }
+
+    @Async
+    public void extractPlyAsync(UUID sessionId) {
         try {
+            ScanSession session = scanSessionReader.findEntityById(sessionId);
             String springPath = Paths.get(session.getFilePath()).toAbsolutePath().toString();
             String pythonPath = springPath.replace("/app/storage/uploads/", "/app/uploads/");
+
+            log.info("PLY extraction started for session {}", sessionId);
             String cacheKey = pathProcessingClient.extractPointcloudPly(pythonPath);
+
             session.updatePlyFileId(cacheKey);
-            log.info("PLY extraction completed, cache_key: {}", cacheKey);
+            scanStatusUpdater.updateStatus(sessionId, ScanStatus.COMPLETED);
+            log.info("PLY extraction completed for session {} (cache_key: {})", sessionId, cacheKey);
+
         } catch (Exception e) {
-            log.warn("PLY extraction failed (non-critical): {}", e.getMessage());
+            log.error("PLY extraction failed for session {}: {}", sessionId, e.getMessage());
+            scanStatusUpdater.updateStatus(sessionId, ScanStatus.FAILED);
         }
-
-        String jobId = pathProcessingClient.startProcessing(fileId);
-
-        scanStatusUpdater.updateStatus(sessionId, ScanStatus.EXTRACTING);
-
-        jobToSessionMap.put(jobId, sessionId);
-        sessionToJobMap.put(sessionId, jobId);
-
-        return new ProcessingStartResponse(jobId, sessionId);
     }
 
     public static String getJobIdForSession(UUID sessionId) {
-        return sessionToJobMap.get(sessionId);
+        return null;
     }
 
     public static UUID getSessionIdForJob(String jobId) {
-        return jobToSessionMap.get(jobId);
+        return null;
     }
 
     private boolean canStartProcessing(ScanStatus status) {
