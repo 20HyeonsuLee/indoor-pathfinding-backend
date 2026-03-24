@@ -1,4 +1,4 @@
-FROM rtabmap-cuda:latest
+FROM introlab3it/rtabmap:jammy
 
 ENV DEBIAN_FRONTEND=noninteractive
 
