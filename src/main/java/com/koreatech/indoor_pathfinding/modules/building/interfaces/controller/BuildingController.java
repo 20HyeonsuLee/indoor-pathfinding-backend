@@ -69,6 +69,12 @@ public class BuildingController implements BuildingApi {
         return ResponseEntity.noContent().build();
     }
 
+    @DeleteMapping("/batch")
+    public ResponseEntity<Void> deleteMultipleBuildings(@RequestBody List<UUID> ids) {
+        buildingDeleter.deleteMultiple(ids);
+        return ResponseEntity.noContent().build();
+    }
+
     @PatchMapping("/{id}/status")
     public ResponseEntity<BuildingResponse> updateBuildingStatus(
             @PathVariable UUID id,
