@@ -79,13 +79,27 @@ def extract_visualization_ply(db_path, output_path, voxel_size=VISUALIZATION_VOX
             '--output', 'cloud',
             db_path,
         ]
+        print(f"  rtabmap-export 실행: {' '.join(cmd)}")
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-        if result.returncode != 0:
-            raise RuntimeError(f"rtabmap-export 실패:\n{result.stderr}")
+        print(f"  returncode={result.returncode}")
+        if result.stdout: print(f"  stdout: {result.stdout[:500]}")
+        if result.stderr: print(f"  stderr: {result.stderr[:500]}")
 
-        source_ply = os.path.join(tmpdir, 'cloud_cloud.ply')
-        if not os.path.exists(source_ply):
-            raise FileNotFoundError("PLY 파일이 생성되지 않았습니다.")
+        if result.returncode != 0:
+            raise RuntimeError(f"rtabmap-export 실패 (code={result.returncode}):\n{result.stderr[:500]}")
+
+        # 출력 파일 찾기 (버전에 따라 파일명이 다를 수 있음)
+        tmpfiles = os.listdir(tmpdir)
+        print(f"  tmpdir 파일: {tmpfiles}")
+
+        source_ply = None
+        for f in tmpfiles:
+            if f.endswith('.ply'):
+                source_ply = os.path.join(tmpdir, f)
+                break
+
+        if source_ply is None:
+            raise FileNotFoundError(f"PLY 파일이 생성되지 않았습니다. tmpdir 내용: {tmpfiles}")
 
         _convert_ply_xyz_rgb(source_ply, output_path)
 
