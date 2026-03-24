@@ -21,8 +21,5 @@ public interface VerticalPassageRepository extends JpaRepository<VerticalPassage
     @Query("SELECT vp FROM VerticalPassage vp LEFT JOIN FETCH vp.segments WHERE vp.id = :id")
     Optional<VerticalPassage> findByIdWithSegments(@Param("id") UUID id);
 
-    @Query("SELECT vp FROM VerticalPassage vp WHERE vp.fromFloor.id = :floorId OR vp.toFloor.id = :floorId")
-    List<VerticalPassage> findByFloorId(@Param("floorId") UUID floorId);
-
     void deleteByBuildingId(UUID buildingId);
 }

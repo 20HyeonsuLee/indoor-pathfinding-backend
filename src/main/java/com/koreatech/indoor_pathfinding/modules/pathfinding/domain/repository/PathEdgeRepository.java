@@ -13,10 +13,6 @@ import java.util.UUID;
 @Repository
 public interface PathEdgeRepository extends JpaRepository<PathEdge, UUID> {
 
-    @Query("SELECT e FROM PathEdge e WHERE e.fromNode.id = :nodeId OR " +
-           "(e.toNode.id = :nodeId AND e.isBidirectional = true)")
-    List<PathEdge> findOutgoingEdges(@Param("nodeId") UUID nodeId);
-
     @Query("SELECT e FROM PathEdge e WHERE e.fromNode.floor.building.id = :buildingId " +
            "OR e.toNode.floor.building.id = :buildingId")
     List<PathEdge> findByBuildingId(@Param("buildingId") UUID buildingId);

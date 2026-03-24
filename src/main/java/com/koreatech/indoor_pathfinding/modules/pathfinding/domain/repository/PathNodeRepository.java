@@ -46,9 +46,6 @@ public interface PathNodeRepository extends JpaRepository<PathNode, UUID> {
         @Param("z") double z
     );
 
-    @Query("SELECT n FROM PathNode n WHERE n.verticalPassage.id = :passageId")
-    List<PathNode> findByVerticalPassageId(@Param("passageId") UUID passageId);
-
     void deleteByFloorId(UUID floorId);
 
     @Modifying

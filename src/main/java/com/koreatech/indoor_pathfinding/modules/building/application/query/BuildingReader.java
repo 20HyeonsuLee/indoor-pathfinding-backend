@@ -40,12 +40,4 @@ public class BuildingReader {
         return BuildingDetailResponse.from(building);
     }
 
-    public Building findEntityById(UUID id) {
-        return buildingRepository.findById(id)
-            .orElseThrow(() -> new BusinessException(ErrorCode.BUILDING_NOT_FOUND));
-    }
-
-    public boolean existsById(UUID id) {
-        return buildingRepository.existsById(id);
-    }
 }

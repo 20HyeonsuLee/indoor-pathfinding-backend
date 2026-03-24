@@ -216,18 +216,4 @@ public class PathProcessingClient {
         }
     }
 
-    public boolean isHealthy() {
-        try {
-            Map<String, Object> response = webClient.get()
-                .uri("/health")
-                .retrieve()
-                .bodyToMono(Map.class)
-                .block();
-
-            return response != null && "healthy".equals(response.get("status"));
-        } catch (Exception e) {
-            log.warn("Path service health check failed: {}", e.getMessage());
-            return false;
-        }
-    }
 }

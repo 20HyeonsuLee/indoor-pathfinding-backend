@@ -14,14 +14,9 @@ public interface BuildingRepository extends JpaRepository<Building, UUID> {
 
     List<Building> findByStatus(BuildingStatus status);
 
-    @Query("SELECT b FROM Building b LEFT JOIN FETCH b.floors WHERE b.id = :id")
-    Optional<Building> findByIdWithFloors(@Param("id") UUID id);
-
     @Query("SELECT b FROM Building b " +
            "LEFT JOIN FETCH b.floors f " +
            "LEFT JOIN FETCH b.verticalPassages " +
            "WHERE b.id = :id")
     Optional<Building> findByIdWithFloorsAndPassages(@Param("id") UUID id);
-
-    boolean existsByName(String name);
 }

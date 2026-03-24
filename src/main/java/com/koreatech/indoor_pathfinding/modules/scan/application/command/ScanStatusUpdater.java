@@ -38,12 +38,4 @@ public class ScanStatusUpdater {
         log.info("Updated plyFileId for session {}: {}", sessionId, plyFileId);
     }
 
-    public ScanSessionResponse setError(UUID sessionId, String errorMessage) {
-        ScanSession session = scanSessionRepository.findById(sessionId)
-            .orElseThrow(() -> new BusinessException(ErrorCode.SCAN_SESSION_NOT_FOUND));
-
-        session.setErrorMessage(errorMessage);
-
-        return ScanSessionResponse.from(session);
-    }
 }

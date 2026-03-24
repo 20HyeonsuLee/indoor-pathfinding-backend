@@ -14,7 +14,6 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.nio.file.Paths;
-import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -117,10 +116,6 @@ public class ProcessingStarter {
 
     public static String getJobIdForSession(UUID sessionId) {
         return sessionToJobMap.get(sessionId);
-    }
-
-    public static UUID getSessionIdForJob(String jobId) {
-        return jobToSessionMap.get(jobId);
     }
 
     public static String getPythonFileIdForSession(UUID sessionId) {

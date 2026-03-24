@@ -1,120 +1,47 @@
 """
-=============================================================================
 실내 경로 처리 서비스 (Indoor Path Processing Service)
-=============================================================================
 
-이 FastAPI 애플리케이션은 RTAB-Map DB 파일을 처리하여
-실내 길찾기에 필요한 경로 데이터를 추출합니다.
-
-[서비스 아키텍처]
-┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
-│  Spring Boot    │────▶│  Path Service   │────▶│  PostgreSQL     │
-│  (메인 서버)    │     │  (이 서비스)    │     │  (pgRouting)    │
-└─────────────────┘     └─────────────────┘     └─────────────────┘
-         │                      │
-         │                      ▼
-         │              ┌───────────────┐
-         └─────────────▶│  .db 파일     │
-                        │  (RTAB-Map)   │
-                        └───────────────┘
+RTAB-Map DB 파일을 처리하여 층 분리 및 PLY 추출을 수행합니다.
 
 [처리 파이프라인]
-1. DB 파일 업로드
-2. 궤적 추출 (extraction)
-3. XY 스무딩 (smoothing) - Z축 보존하여 계단 감지 보호
-4. 수직통로 감지 & 층 분리 (vertical_detector)
-5. 층별 가우시안 스무딩 (smoothing) - 중복 제거 전 노이즈 감소
-6. 중복 제거 (deduplication)
-7. RDP + 직선 스냅 (path_flattening) - 경로 직선화
-8. 갈림길 감지 & 그래프 추출 (junction_detection)
-9. 결과 JSON 반환
+1. DB에서 궤적 추출 (extraction)
+2. 수직통로 감지 & 층 분리 (vertical_detector)
+3. 층별 경로 데이터 생성
+4. PLY 추출 (ply_extraction)
 
 [API 엔드포인트]
-- POST /api/v1/upload              : DB 파일 업로드
-- POST /api/v1/process/{file_id}   : 처리 시작 (비동기)
-- GET  /api/v1/jobs/{job_id}       : 작업 상태 조회
-- GET  /api/v1/jobs/{job_id}/result: 처리 결과 조회
-- GET  /api/v1/preview/{job_id}/{type}: 미리보기 이미지
-
-[환경 변수]
-- UPLOAD_DIR: 업로드 디렉토리 (기본: ./uploads)
-- OUTPUT_DIR: 출력 디렉토리 (기본: ./output)
+- POST /api/v1/upload                    : DB 파일 업로드
+- POST /api/v1/process/{file_id}         : 처리 시작 (비동기)
+- GET  /api/v1/jobs/{job_id}             : 작업 상태 조회
+- GET  /api/v1/jobs/{job_id}/result      : 처리 결과 조회
+- POST /api/v1/pointcloud/extract        : 전체 PLY 추출
+- POST /api/v1/pointcloud/extract-floor  : 층별 PLY 추출
+- GET  /api/v1/pointcloud/{cache_key}/ply: PLY 다운로드
 """
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
-from typing import List, Optional, Dict
+from typing import Optional, Dict
 import os
 import uuid
 import asyncio
+import struct
 from datetime import datetime
 import numpy as np
 
-# 서비스 모듈 임포트
 from services.extraction import extract_trajectory_from_db, get_trajectory_stats
 from services.vertical_detector import detect_stairs_first, separate_floors, assign_floors_to_stairs
-from services.junction_detection import get_graph_stats, merge_floor_graphs
-from services.pointcloud_graph import build_pointcloud_graph, extract_visualization_ply
+from services.ply_extraction import extract_visualization_ply
 
-
-# =============================================================================
-# FastAPI 앱 초기화
-# =============================================================================
-
-tags_metadata = [
-    {
-        "name": "System",
-        "description": "서비스 상태 확인 및 헬스체크",
-    },
-    {
-        "name": "Upload",
-        "description": "RTAB-Map .db 파일 업로드",
-    },
-    {
-        "name": "Processing",
-        "description": "경로 데이터 처리 (비동기 작업 관리)",
-    },
-    {
-        "name": "Preview",
-        "description": "처리 결과 미리보기 이미지",
-    },
-    {
-        "name": "Pointcloud",
-        "description": "시각화용 포인트클라우드 PLY 추출 및 조회",
-    },
-]
 
 app = FastAPI(
-    title="실내 경로 처리 서비스 (Indoor Path Processing Service)",
-    description="""
-    RTAB-Map DB 파일에서 실내 경로 데이터를 추출하고 처리하는 서비스입니다.
-
-    ## 주요 기능
-    - 카메라 궤적 추출
-    - 경로 직선화 (카메라 흔들림 보정)
-    - 갈림길 감지 및 그래프 구축
-    - 계단/엘리베이터 감지
-    - 층 분리
-
-    ## 사용 방법
-    1. `/api/v1/upload`로 .db 파일 업로드
-    2. `/api/v1/process/{file_id}`로 처리 시작
-    3. `/api/v1/jobs/{job_id}`로 진행 상황 확인
-    4. `/api/v1/jobs/{job_id}/result`로 결과 조회
-    """,
-    version="1.0.0",
-    contact={
-        "name": "KoreaTech Indoor Pathfinding Team",
-        "url": "https://github.com/20HyeonsuLee/indoor-pathfinding-backend",
-    },
-    openapi_tags=tags_metadata,
-    docs_url="/docs",
-    redoc_url="/redoc",
+    title="실내 경로 처리 서비스",
+    description="RTAB-Map DB 파일에서 층 분리 및 PLY 추출을 수행하는 서비스",
+    version="2.0.0",
 )
 
-# CORS 설정
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -128,29 +55,25 @@ app.add_middleware(
 # 설정
 # =============================================================================
 
-# 환경 변수에서 디렉토리 경로 로드
 UPLOAD_DIR = os.getenv("UPLOAD_DIR", "./uploads")
 OUTPUT_DIR = os.getenv("OUTPUT_DIR", "./output")
 PLY_CACHE_DIR = os.getenv("PLY_CACHE_DIR", "./ply_cache")
 
-# 디렉토리 생성 (없으면)
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 os.makedirs(PLY_CACHE_DIR, exist_ok=True)
 
-# 작업 저장소 (메모리 기반 - 프로덕션에서는 Redis 등 사용 권장)
 processing_jobs: Dict[str, "ProcessingJob"] = {}
 
 
 # =============================================================================
-# 데이터 모델 (Pydantic)
+# 데이터 모델
 # =============================================================================
 
 class ProcessingJob(BaseModel):
-    """처리 작업의 상태를 추적하는 모델"""
     job_id: str
-    status: str  # PENDING, PROCESSING, COMPLETED, FAILED
-    progress: int  # 0 ~ 100
+    status: str
+    progress: int
     message: str
     created_at: str
     completed_at: Optional[str] = None
@@ -158,488 +81,190 @@ class ProcessingJob(BaseModel):
     error: Optional[str] = None
 
 
-class Point3DResponse(BaseModel):
-    """3D 좌표 응답 모델"""
-    x: float
-    y: float
-    z: float
+class PlyExtractRequest(BaseModel):
+    db_path: Optional[str] = None
+    file_id: Optional[str] = None
 
 
-class PathSegmentResponse(BaseModel):
-    """경로 세그먼트 응답 모델"""
-    sequence_order: int
-    start_point: Point3DResponse
-    end_point: Point3DResponse
-    length: float
-
-
-class FloorPathResponse(BaseModel):
-    """층별 경로 응답 모델"""
-    floor_level: int
-    floor_name: str
-    segments: List[PathSegmentResponse]
-    bounds: dict
-    total_distance: float
-
-
-class VerticalPassageResponse(BaseModel):
-    """수직 통로(계단/엘리베이터) 응답 모델"""
-    type: str  # STAIRCASE 또는 ELEVATOR
-    from_floor_level: int
-    to_floor_level: int
-    segments: List[PathSegmentResponse]
-    entry_point: Point3DResponse
-    exit_point: Point3DResponse
-
-
-class PathNodeResponse(BaseModel):
-    """경로 노드 응답 모델 (길찾기 그래프용)"""
-    id: str
-    x: float
-    y: float
-    z: float
-    type: str  # WAYPOINT, JUNCTION, ENDPOINT, POI_CANDIDATE
-    floor_level: Optional[int] = None
-
-
-class PathEdgeResponse(BaseModel):
-    """경로 엣지 응답 모델 (길찾기 그래프용)"""
-    id: str
-    from_node_id: str
-    to_node_id: str
-    distance: float
-    edge_type: str  # HORIZONTAL, VERTICAL_STAIRCASE, VERTICAL_ELEVATOR
-    is_bidirectional: bool = True
-
-
-class ProcessingResultResponse(BaseModel):
-    """전체 처리 결과 응답 모델"""
-    job_id: str
-    total_nodes: int
-    total_distance: float
-    floor_paths: List[FloorPathResponse]
-    vertical_passages: List[VerticalPassageResponse]
-    path_nodes: List[PathNodeResponse]  # 추가: 그래프 노드
-    path_edges: List[PathEdgeResponse]  # 추가: 그래프 엣지
-    preview_image_path: str
-    processed_preview_path: str
-    stats: dict
+class FloorPlyRequest(BaseModel):
+    source_cache_key: str
+    min_z: float
+    max_z: float
 
 
 # =============================================================================
 # 헬스 체크
 # =============================================================================
 
-@app.get("/debug/storage", tags=["System"], summary="스토리지 상태 확인")
-async def debug_storage():
-    """업로드/PLY 캐시 디렉토리 내 파일 목록"""
-    result = {}
-    for name, path in [("uploads", UPLOAD_DIR), ("ply_cache", PLY_CACHE_DIR), ("output", OUTPUT_DIR)]:
-        try:
-            files = os.listdir(path)
-            result[name] = {
-                "path": os.path.abspath(path),
-                "files": [{"name": f, "size_mb": round(os.path.getsize(os.path.join(path, f)) / 1024 / 1024, 2)}
-                          for f in files[:20]],
-                "total": len(files),
-            }
-        except Exception as e:
-            result[name] = {"path": path, "error": str(e)}
-    return result
-
-
-@app.get("/health", tags=["System"], summary="서비스 상태 확인")
+@app.get("/health")
 async def health_check():
-    """
-    서비스 상태 확인
-
-    Returns:
-        서비스 상태 및 타임스탬프
-    """
-    return {
-        "status": "healthy",
-        "service": "Indoor Path Processing Service",
-        "timestamp": datetime.now().isoformat()
-    }
+    return {"status": "healthy", "timestamp": datetime.now().isoformat()}
 
 
 # =============================================================================
 # 파일 업로드
 # =============================================================================
 
-@app.post("/api/v1/upload", tags=["Upload"], summary="RTAB-Map DB 파일 업로드", status_code=201,
-           responses={400: {"description": "잘못된 파일 형식 (.db 파일만 허용)"}})
+@app.post("/api/v1/upload", status_code=201)
 async def upload_db_file(file: UploadFile = File(...)):
-    """
-    RTAB-Map .db 파일 업로드
-
-    Args:
-        file: 업로드할 .db 파일
-
-    Returns:
-        - file_id: 파일 고유 ID (이후 처리에 사용)
-        - filename: 원본 파일명
-        - file_path: 저장된 경로
-        - size: 파일 크기 (bytes)
-
-    Raises:
-        400: .db 파일이 아닌 경우
-        500: 저장 실패
-    """
-    # 파일 확장자 검증
     if not file.filename.endswith('.db'):
-        raise HTTPException(
-            status_code=400,
-            detail="파일 형식 오류: .db 파일만 업로드할 수 있습니다."
-        )
+        raise HTTPException(status_code=400, detail=".db 파일만 업로드 가능합니다.")
 
-    # 고유 파일 ID 생성
     file_id = str(uuid.uuid4())
     file_path = os.path.join(UPLOAD_DIR, f"{file_id}.db")
 
-    try:
-        # 파일 저장
-        contents = await file.read()
-        with open(file_path, "wb") as f:
-            f.write(contents)
+    contents = await file.read()
+    with open(file_path, "wb") as f:
+        f.write(contents)
 
-        return {
-            "file_id": file_id,
-            "filename": file.filename,
-            "file_path": file_path,
-            "size": len(contents),
-            "size_mb": round(len(contents) / (1024 * 1024), 2)
-        }
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"파일 저장 실패: {str(e)}"
-        )
+    return {
+        "file_id": file_id,
+        "filename": file.filename,
+        "file_path": file_path,
+        "size": len(contents),
+    }
 
 
 # =============================================================================
 # 처리 시작
 # =============================================================================
 
-@app.post("/api/v1/process/{file_id}", tags=["Processing"], summary="경로 처리 작업 시작",
-           responses={404: {"description": "파일을 찾을 수 없음"}})
+@app.post("/api/v1/process/{file_id}")
 async def start_processing(file_id: str, background_tasks: BackgroundTasks):
-    """
-    경로 처리 작업 시작 (비동기)
-
-    업로드된 DB 파일에 대해 백그라운드에서 처리를 시작합니다.
-    처리 상태는 /api/v1/jobs/{job_id}에서 확인할 수 있습니다.
-
-    Args:
-        file_id: 업로드 시 받은 파일 ID
-
-    Returns:
-        - job_id: 작업 ID
-        - status: 현재 상태 (PENDING)
-
-    Raises:
-        404: 파일을 찾을 수 없음
-    """
     file_path = os.path.join(UPLOAD_DIR, f"{file_id}.db")
 
     if not os.path.exists(file_path):
-        raise HTTPException(
-            status_code=404,
-            detail=f"파일을 찾을 수 없습니다: {file_id}"
-        )
+        raise HTTPException(status_code=404, detail=f"파일 없음: {file_id}")
 
-    # 작업 생성
     job_id = str(uuid.uuid4())
     processing_jobs[job_id] = ProcessingJob(
         job_id=job_id,
         status="PENDING",
         progress=0,
-        message="처리 작업이 대기열에 추가되었습니다.",
-        created_at=datetime.now().isoformat()
+        message="대기 중",
+        created_at=datetime.now().isoformat(),
     )
 
-    # 백그라운드에서 처리 시작
     background_tasks.add_task(process_path_async, job_id, file_path)
-
     return {"job_id": job_id, "status": "PENDING"}
 
 
 # =============================================================================
-# 비동기 처리 로직
+# 비동기 처리
 # =============================================================================
 
 async def process_path_async(job_id: str, file_path: str):
-    """
-    경로 처리 파이프라인 (백그라운드 태스크)
-
-    [처리 단계]
-    1. 궤적 추출 + 수직통로 감지 + 층 분리 (35%)
-    2. 포인트클라우드 기반 2D 평면도 → 그래프 구축 (70%)
-    3. 층 간 그래프 병합 (85%)
-    4. 결과 생성 (100%)
-
-    Args:
-        job_id: 작업 ID
-        file_path: DB 파일 경로
-    """
     try:
         job = processing_jobs[job_id]
         job.status = "PROCESSING"
 
-        # ─────────────────────────────────────────────────────────────────
-        # Step 1: 궤적 추출 (10%)
-        # ─────────────────────────────────────────────────────────────────
-        job.progress = 5
-        job.message = "DB에서 궤적 추출 중..."
+        # Step 1: 궤적 추출
+        job.progress = 10
+        job.message = "궤적 추출 중..."
 
         raw_positions, node_ids = await asyncio.to_thread(
             extract_trajectory_from_db, file_path
         )
-
         trajectory_stats = get_trajectory_stats(raw_positions)
-        job.progress = 10
+
+        job.progress = 30
         job.message = f"궤적 추출 완료: {len(raw_positions)}개 포인트"
 
-        # ─────────────────────────────────────────────────────────────────
-        # Step 2: 수직 통로 감지 (25%)
-        # ─────────────────────────────────────────────────────────────────
-        job.progress = 15
+        # Step 2: 수직통로 감지
+        job.progress = 40
         job.message = "계단/엘리베이터 감지 중..."
 
         vertical_passages, stair_mask = await asyncio.to_thread(
             detect_stairs_first, raw_positions
         )
 
-        job.progress = 25
+        job.progress = 50
         job.message = f"수직 통로 {len(vertical_passages)}개 감지"
 
-        # ─────────────────────────────────────────────────────────────────
-        # Step 3: 층 분리 (35%)
-        # ─────────────────────────────────────────────────────────────────
-        job.progress = 30
+        # Step 3: 층 분리
+        job.progress = 60
         job.message = "층 분리 중..."
 
         floors_data = await asyncio.to_thread(
             separate_floors, raw_positions, node_ids,
             stair_mask=stair_mask, vertical_passages=vertical_passages
         )
-
         vertical_passages = assign_floors_to_stairs(vertical_passages, floors_data)
 
-        job.progress = 35
+        job.progress = 80
         job.message = f"{len(floors_data)}개 층 분리 완료"
 
-        # ─────────────────────────────────────────────────────────────────
-        # Step 4: 포인트클라우드 기반 그래프 구축 (70%)
-        # ─────────────────────────────────────────────────────────────────
-        job.progress = 40
-        job.message = "포인트클라우드에서 2D 평면도 생성 중..."
-
-        floor_graphs, pc_floors, peaks, world_points, cam_positions = \
-            await asyncio.to_thread(build_pointcloud_graph, file_path)
-
-        job.progress = 70
-        total_n = sum(len(n) for n, _ in floor_graphs.values())
-        job.message = f"그래프 구축 완료: 노드 {total_n}개"
-
-        # ─────────────────────────────────────────────────────────────────
-        # Step 5: 층 간 그래프 병합 (85%)
-        # ─────────────────────────────────────────────────────────────────
-        job.progress = 75
-        job.message = "층 간 그래프 병합 중..."
-
-        all_nodes, all_edges = merge_floor_graphs(floor_graphs, vertical_passages)
-
-        graph_stats = get_graph_stats(all_nodes, all_edges)
-
-        # floor_segments 생성: 실제 그래프 엣지를 segments로 변환
-        # GraphBuilder가 segment의 start→end를 엣지로 만들므로
-        # 포인트클라우드 그래프의 엣지를 그대로 segment로 전달
-        floor_segments = {}
-        for floor_level, (nodes, edges) in floor_graphs.items():
-            if not nodes or not edges:
-                continue
-            node_by_id = {n['id']: n for n in nodes}
-            segs = []
-            for i, e in enumerate(edges):
-                fn = node_by_id.get(e['from_node_id'])
-                tn = node_by_id.get(e['to_node_id'])
-                if not fn or not tn:
-                    continue
-                segs.append({
-                    "sequence_order": i,
-                    "start_point": {"x": fn['x'], "y": fn['y'], "z": fn['z']},
-                    "end_point": {"x": tn['x'], "y": tn['y'], "z": tn['z']},
-                    "length": e['distance'],
-                })
-            floor_segments[floor_level] = segs
-
-        # smoothed_floors (미리보기 이미지용, 카메라 궤적)
-        smoothed_floors = {}
-        for fi, fdata in sorted(pc_floors.items()):
-            floor_level = fi + 1
-            cam_pos = fdata.get('cam_positions', np.empty((0, 3)))
-            if len(cam_pos) > 0:
-                smoothed_floors[floor_level] = cam_pos
-
-        job.progress = 85
-        job.message = f"그래프 구축 완료: 노드 {len(all_nodes)}개, 엣지 {len(all_edges)}개"
-
-        # ─────────────────────────────────────────────────────────────────
-        # Step 8: 미리보기 이미지 생성 (90%)
-        # ─────────────────────────────────────────────────────────────────
-        job.progress = 88
-        job.message = "미리보기 이미지 생성 중..."
-
-        output_prefix = os.path.join(OUTPUT_DIR, job_id)
-        preview_paths = await asyncio.to_thread(
-            _generate_preview_images,
-            raw_positions,
-            smoothed_floors,
-            vertical_passages,
-            output_prefix
-        )
-
+        # Step 4: 결과 생성
         job.progress = 90
-        job.message = "미리보기 생성 완료"
+        job.message = "결과 생성 중..."
 
-        # ─────────────────────────────────────────────────────────────────
-        # Step 9: 결과 생성 (100%)
-        # ─────────────────────────────────────────────────────────────────
-        job.progress = 95
-        job.message = "결과 데이터 생성 중..."
-
-        result = _build_processing_result(
-            job_id=job_id,
-            raw_positions=raw_positions,
-            smoothed_floors=smoothed_floors,
-            vertical_passages=vertical_passages,
-            all_nodes=all_nodes,
-            all_edges=all_edges,
-            preview_paths=preview_paths,
-            trajectory_stats=trajectory_stats,
-            graph_stats=graph_stats,
-            floor_segments=floor_segments
+        result = _build_result(
+            job_id, raw_positions, floors_data,
+            vertical_passages, trajectory_stats,
         )
 
-        # 완료
         job.status = "COMPLETED"
         job.progress = 100
-        job.message = "처리 완료!"
+        job.message = "처리 완료"
         job.completed_at = datetime.now().isoformat()
         job.result = result
 
     except Exception as e:
-        # 에러 처리
         job = processing_jobs[job_id]
         job.status = "FAILED"
         job.error = str(e)
         job.message = f"처리 실패: {str(e)}"
 
 
-def _build_processing_result(
+def _build_result(
     job_id: str,
     raw_positions: np.ndarray,
-    smoothed_floors: dict,
+    floors_data: list,
     vertical_passages: list,
-    all_nodes: list,
-    all_edges: list,
-    preview_paths: dict,
     trajectory_stats: dict,
-    graph_stats: dict,
-    floor_segments: dict = None
 ) -> dict:
-    """
-    처리 결과 응답 데이터를 생성합니다.
-    """
     floor_paths = []
-    total_distance = 0
+    total_distance = 0.0
 
-    if floor_segments:
-        # 포인트클라우드 모드: 실제 그래프 엣지를 segments로 직접 사용
-        for floor_level, segments in floor_segments.items():
-            if not segments:
-                continue
+    for floor_info in floors_data:
+        floor_level = floor_info['floor_level']
+        positions = np.array(floor_info['positions'])
 
-            floor_distance = sum(s["length"] for s in segments)
-            total_distance += floor_distance
+        if len(positions) < 2:
+            continue
 
-            # 모든 좌표에서 bounds 계산
-            all_x = []
-            all_y = []
-            for s in segments:
-                all_x.extend([s["start_point"]["x"], s["end_point"]["x"]])
-                all_y.extend([s["start_point"]["y"], s["end_point"]["y"]])
+        segments = []
+        floor_distance = 0.0
 
-            floor_name = f"{floor_level}층" if floor_level > 0 else f"B{abs(floor_level)}"
+        for i in range(len(positions) - 1):
+            start = positions[i]
+            end = positions[i + 1]
+            length = float(np.linalg.norm(end - start))
+            floor_distance += length
 
-            floor_paths.append({
-                "floor_level": floor_level,
-                "floor_name": floor_name,
-                "segments": segments,
-                "bounds": {
-                    "min_x": min(all_x), "max_x": max(all_x),
-                    "min_y": min(all_y), "max_y": max(all_y),
-                },
-                "total_distance": floor_distance,
+            segments.append({
+                "sequence_order": i,
+                "start_point": {"x": float(start[0]), "y": float(start[1]), "z": float(start[2])},
+                "end_point": {"x": float(end[0]), "y": float(end[1]), "z": float(end[2])},
+                "length": length,
             })
-    else:
-        # 기존 pose 모드: smoothed_floors의 순차 좌표를 segments로 변환
-        for floor_level, positions in smoothed_floors.items():
-            positions = np.array(positions)
 
-            if len(positions) < 2:
-                continue
+        total_distance += floor_distance
+        floor_name = f"{floor_level}층" if floor_level > 0 else f"B{abs(floor_level)}"
 
-            segments = []
-
-            for i in range(len(positions) - 1):
-                start = positions[i]
-                end = positions[i + 1]
-                length = float(np.linalg.norm(end - start))
-                total_distance += length
-
-                segments.append({
-                    "sequence_order": i,
-                    "start_point": {
-                        "x": float(start[0]),
-                        "y": float(start[1]),
-                        "z": float(start[2])
-                    },
-                    "end_point": {
-                        "x": float(end[0]),
-                        "y": float(end[1]),
-                        "z": float(end[2])
-                    },
-                    "length": length
-                })
-
-            # 경계 계산
-            bounds = {
+        floor_paths.append({
+            "floor_level": floor_level,
+            "floor_name": floor_name,
+            "segments": segments,
+            "bounds": {
                 "min_x": float(positions[:, 0].min()),
                 "max_x": float(positions[:, 0].max()),
                 "min_y": float(positions[:, 1].min()),
-                "max_y": float(positions[:, 1].max())
-            }
-
-            floor_distance = sum(s["length"] for s in segments)
-
-            # 층 이름 생성 (음수면 지하)
-            if floor_level >= 0:
-                floor_name = f"{floor_level}층" if floor_level > 0 else "1층"
-            else:
-                floor_name = f"B{abs(floor_level)}"
-
-            floor_paths.append({
-                "floor_level": floor_level,
-                "floor_name": floor_name,
-                "segments": segments,
-                "bounds": bounds,
-            "total_distance": floor_distance
+                "max_y": float(positions[:, 1].max()),
+            },
+            "total_distance": floor_distance,
         })
 
-    # 수직 통로 데이터 생성
     passage_results = []
     for passage in vertical_passages:
         positions = np.array(passage['positions'])
@@ -654,7 +279,7 @@ def _build_processing_result(
                 "sequence_order": i,
                 "start_point": {"x": float(start[0]), "y": float(start[1]), "z": float(start[2])},
                 "end_point": {"x": float(end[0]), "y": float(end[1]), "z": float(end[2])},
-                "length": length
+                "length": length,
             })
 
         passage_results.append({
@@ -662,16 +287,8 @@ def _build_processing_result(
             "from_floor_level": passage.get('from_floor', 0),
             "to_floor_level": passage.get('to_floor', 0),
             "segments": segments,
-            "entry_point": {
-                "x": float(positions[0][0]),
-                "y": float(positions[0][1]),
-                "z": float(positions[0][2])
-            },
-            "exit_point": {
-                "x": float(positions[-1][0]),
-                "y": float(positions[-1][1]),
-                "z": float(positions[-1][2])
-            }
+            "entry_point": {"x": float(positions[0][0]), "y": float(positions[0][1]), "z": float(positions[0][2])},
+            "exit_point": {"x": float(positions[-1][0]), "y": float(positions[-1][1]), "z": float(positions[-1][2])},
         })
 
     return {
@@ -680,206 +297,61 @@ def _build_processing_result(
         "total_distance": total_distance,
         "floor_paths": floor_paths,
         "vertical_passages": passage_results,
-        "path_nodes": all_nodes,
-        "path_edges": all_edges,
-        "preview_image_path": preview_paths.get('raw', ''),
-        "processed_preview_path": preview_paths.get('processed', ''),
-        "stats": {
-            **trajectory_stats,
-            **graph_stats
-        }
+        "path_nodes": [],
+        "path_edges": [],
+        "preview_image_path": "",
+        "processed_preview_path": "",
+        "stats": trajectory_stats,
     }
 
 
-def _generate_preview_images(
-    raw_positions: np.ndarray,
-    smoothed_floors: dict,
-    vertical_passages: list,
-    output_prefix: str
-) -> dict:
-    """
-    미리보기 이미지를 생성합니다.
-
-    시각화 모듈이 없는 경우 빈 경로를 반환합니다.
-
-    Args:
-        raw_positions: 원본 좌표
-        smoothed_floors: 층별 처리된 좌표
-        vertical_passages: 수직 통로 리스트
-        output_prefix: 출력 파일 접두사
-
-    Returns:
-        이미지 경로 딕셔너리
-    """
-    try:
-        from services.visualization import generate_preview_images
-        return generate_preview_images(
-            raw_positions,
-            smoothed_floors,
-            vertical_passages,
-            output_prefix
-        )
-    except ImportError:
-        # 시각화 모듈 없으면 빈 경로 반환
-        return {'raw': '', 'processed': ''}
-
-
 # =============================================================================
-# 작업 상태 조회
+# 작업 상태/결과 조회
 # =============================================================================
 
-@app.get("/api/v1/jobs/{job_id}", tags=["Processing"], summary="처리 작업 상태 조회",
-         responses={404: {"description": "작업을 찾을 수 없음"}})
+@app.get("/api/v1/jobs/{job_id}")
 async def get_job_status(job_id: str):
-    """
-    처리 작업 상태 조회
-
-    Args:
-        job_id: 작업 ID
-
-    Returns:
-        - job_id: 작업 ID
-        - status: 상태 (PENDING/PROCESSING/COMPLETED/FAILED)
-        - progress: 진행률 (0-100)
-        - message: 현재 단계 메시지
-        - created_at: 생성 시각
-        - completed_at: 완료 시각 (완료 시)
-        - error: 에러 메시지 (실패 시)
-
-    Raises:
-        404: 작업을 찾을 수 없음
-    """
     if job_id not in processing_jobs:
-        raise HTTPException(
-            status_code=404,
-            detail=f"작업을 찾을 수 없습니다: {job_id}"
-        )
+        raise HTTPException(status_code=404, detail=f"작업 없음: {job_id}")
 
-    job = processing_jobs[job_id]
-
-    # result는 별도 엔드포인트에서 제공
-    response = job.model_dump()
-    if response.get('result'):
-        del response['result']
-
+    response = processing_jobs[job_id].model_dump()
+    response.pop('result', None)
     return response
 
 
-@app.get("/api/v1/jobs/{job_id}/result", tags=["Processing"], summary="처리 작업 결과 조회",
-         response_model=ProcessingResultResponse,
-         responses={400: {"description": "작업이 아직 완료되지 않음"}, 404: {"description": "작업을 찾을 수 없음"}})
+@app.get("/api/v1/jobs/{job_id}/result")
 async def get_job_result(job_id: str):
-    """
-    처리 작업 결과 조회
-
-    Args:
-        job_id: 작업 ID
-
-    Returns:
-        ProcessingResultResponse 형식의 처리 결과
-
-    Raises:
-        404: 작업을 찾을 수 없음
-        400: 작업이 아직 완료되지 않음
-    """
     if job_id not in processing_jobs:
-        raise HTTPException(
-            status_code=404,
-            detail=f"작업을 찾을 수 없습니다: {job_id}"
-        )
+        raise HTTPException(status_code=404, detail=f"작업 없음: {job_id}")
 
     job = processing_jobs[job_id]
-
     if job.status != "COMPLETED":
-        raise HTTPException(
-            status_code=400,
-            detail=f"작업이 아직 완료되지 않았습니다. 현재 상태: {job.status}"
-        )
+        raise HTTPException(status_code=400, detail=f"미완료 상태: {job.status}")
 
     return job.result
 
 
 # =============================================================================
-# 미리보기 이미지
+# 포인트클라우드 PLY
 # =============================================================================
 
-@app.get("/api/v1/preview/{job_id}/{image_type}", tags=["Preview"], summary="미리보기 이미지 조회",
-         responses={400: {"description": "잘못된 이미지 타입"}, 404: {"description": "이미지를 찾을 수 없음"}})
-async def get_preview_image(job_id: str, image_type: str):
-    """
-    미리보기 이미지 조회
-
-    Args:
-        job_id: 작업 ID
-        image_type: 이미지 타입 ('raw' 또는 'processed')
-
-    Returns:
-        PNG 이미지 파일
-
-    Raises:
-        400: 잘못된 이미지 타입
-        404: 이미지를 찾을 수 없음
-    """
-    allowed_types = {'raw', 'processed', 'comparison'}
-    if image_type not in allowed_types:
-        raise HTTPException(
-            status_code=400,
-            detail=f"이미지 타입은 {allowed_types} 중 하나여야 합니다."
-        )
-
-    # job_id 형식 검증 (UUID만 허용, path traversal 방지)
-    try:
-        uuid.UUID(job_id)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="잘못된 작업 ID 형식입니다.")
-
-    image_path = os.path.join(OUTPUT_DIR, f"{job_id}_{image_type}.png")
-
-    if not os.path.exists(image_path):
-        raise HTTPException(
-            status_code=404,
-            detail="이미지를 찾을 수 없습니다."
-        )
-
-    return FileResponse(image_path, media_type="image/png")
-
-
-# =============================================================================
-# 포인트클라우드 PLY (시각화용)
-# =============================================================================
-
-class PlyExtractRequest(BaseModel):
-    """PLY 추출 요청 - db_path 직접 지정 또는 file_id로 UPLOAD_DIR 내 파일 참조"""
-    db_path: Optional[str] = None
-    file_id: Optional[str] = None
-
-
-@app.post("/api/v1/pointcloud/extract", tags=["Pointcloud"],
-          summary="시각화용 PLY 추출",
-          responses={404: {"description": "파일을 찾을 수 없음"}})
+@app.post("/api/v1/pointcloud/extract")
 async def extract_pointcloud_ply(request: PlyExtractRequest):
-    """
-    .db 파일에서 시각화용 경량 PLY를 추출한다.
-    file_id 또는 db_path 중 하나를 지정한다.
-    """
     import hashlib
 
-    # file_id가 있으면 UPLOAD_DIR에서 찾기
     if request.file_id:
         db_path = os.path.join(UPLOAD_DIR, f"{request.file_id}.db")
     elif request.db_path:
         db_path = request.db_path
     else:
-        raise HTTPException(status_code=400, detail="file_id 또는 db_path가 필요합니다.")
+        raise HTTPException(status_code=400, detail="file_id 또는 db_path 필요")
 
     if not os.path.exists(db_path):
-        raise HTTPException(status_code=404, detail=f"파일을 찾을 수 없습니다: {db_path}")
+        raise HTTPException(status_code=404, detail=f"파일 없음: {db_path}")
 
-    # 파일 경로를 해시하여 캐시 키 생성
     cache_key = hashlib.md5(db_path.encode()).hexdigest()
     ply_path = os.path.join(PLY_CACHE_DIR, f"{cache_key}.ply")
 
-    # 이미 추출된 파일이 있으면 스킵
     if os.path.exists(ply_path):
         file_size = os.path.getsize(ply_path)
         return {
@@ -890,11 +362,7 @@ async def extract_pointcloud_ply(request: PlyExtractRequest):
             "size_mb": round(file_size / (1024 * 1024), 2),
         }
 
-    # PLY 추출 (동기, 10~30초 소요)
-    try:
-        await asyncio.to_thread(extract_visualization_ply, db_path, ply_path)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"PLY 추출 실패: {str(e)}")
+    await asyncio.to_thread(extract_visualization_ply, db_path, ply_path)
 
     file_size = os.path.getsize(ply_path)
     return {
@@ -906,22 +374,12 @@ async def extract_pointcloud_ply(request: PlyExtractRequest):
     }
 
 
-@app.get("/api/v1/pointcloud/{cache_key}/ply", tags=["Pointcloud"],
-         summary="PLY 파일 다운로드",
-         responses={404: {"description": "PLY 파일이 없음 (먼저 extract 호출 필요)"}})
+@app.get("/api/v1/pointcloud/{cache_key}/ply")
 async def get_pointcloud_ply(cache_key: str):
-    """
-    캐시된 PLY 파일을 다운로드한다.
-
-    먼저 /extract 엔드포인트를 호출하여 PLY를 생성해야 한다.
-    """
     ply_path = os.path.join(PLY_CACHE_DIR, f"{cache_key}.ply")
 
     if not os.path.exists(ply_path):
-        raise HTTPException(
-            status_code=404,
-            detail="PLY 파일이 없습니다. 먼저 /extract를 호출하세요."
-        )
+        raise HTTPException(status_code=404, detail="PLY 없음. /extract 먼저 호출 필요")
 
     return FileResponse(
         ply_path,
@@ -931,36 +389,26 @@ async def get_pointcloud_ply(cache_key: str):
     )
 
 
-class FloorPlyRequest(BaseModel):
-    """층별 PLY 추출 요청"""
-    source_cache_key: str  # 전체 PLY의 cache_key
-    min_z: float           # API 좌표 Z 최소 (높이)
-    max_z: float           # API 좌표 Z 최대
-
-
-@app.post("/api/v1/pointcloud/extract-floor", tags=["Pointcloud"],
-          summary="전체 PLY에서 층별 PLY 추출 (Z 범위 필터링)")
+@app.post("/api/v1/pointcloud/extract-floor")
 async def extract_floor_ply(request: FloorPlyRequest):
-    """
-    이미 추출된 전체 PLY에서 Z 범위로 필터링하여 층별 PLY를 생성한다.
-    """
-    import hashlib, struct
+    import hashlib
 
     source_path = os.path.join(PLY_CACHE_DIR, f"{request.source_cache_key}.ply")
     if not os.path.exists(source_path):
-        raise HTTPException(status_code=404, detail="원본 PLY가 없습니다. 먼저 /extract를 호출하세요.")
+        raise HTTPException(status_code=404, detail="원본 PLY 없음. /extract 먼저 호출 필요")
 
-    # 층 범위를 포함한 캐시 키
     floor_key = hashlib.md5(
         f"{request.source_cache_key}_{request.min_z}_{request.max_z}".encode()
     ).hexdigest()
     floor_ply_path = os.path.join(PLY_CACHE_DIR, f"{floor_key}.ply")
 
     if os.path.exists(floor_ply_path):
-        return {"cache_key": floor_key, "status": "CACHED",
-                "size_mb": round(os.path.getsize(floor_ply_path) / 1024 / 1024, 2)}
+        return {
+            "cache_key": floor_key,
+            "status": "CACHED",
+            "size_mb": round(os.path.getsize(floor_ply_path) / 1024 / 1024, 2),
+        }
 
-    # 원본 PLY 읽기 (binary_little_endian, xyz+rgb = 15 bytes/point)
     with open(source_path, 'rb') as f:
         n_vertices = 0
         while True:
@@ -971,20 +419,17 @@ async def extract_floor_ply(request: FloorPlyRequest):
                 break
         data = f.read()
 
-    # Z 범위 필터링 (PLY의 z = API의 z = 높이)
-    point_size = 15  # 3*float32 + 3*uint8
+    point_size = 15
     filtered = bytearray()
     count = 0
 
     for i in range(n_vertices):
         offset = i * point_size
         x, y, z = struct.unpack_from('<fff', data, offset)
-        # PLY의 z가 API의 z (높이)
         if request.min_z <= z <= request.max_z:
             filtered.extend(data[offset:offset + point_size])
             count += 1
 
-    # 필터링된 PLY 저장
     header = (
         "ply\n"
         "format binary_little_endian 1.0\n"
@@ -1003,8 +448,6 @@ async def extract_floor_ply(request: FloorPlyRequest):
         f.write(bytes(filtered))
 
     size_mb = round(os.path.getsize(floor_ply_path) / 1024 / 1024, 2)
-    print(f"  층별 PLY: {count:,}개 포인트 ({size_mb}MB), Z=[{request.min_z:.1f}, {request.max_z:.1f}]")
-
     return {"cache_key": floor_key, "status": "CREATED", "point_count": count, "size_mb": size_mb}
 
 
@@ -1014,15 +457,6 @@ async def extract_floor_ply(request: FloorPlyRequest):
 
 if __name__ == "__main__":
     import uvicorn
-
-    print("=" * 60)
-    print("  실내 경로 처리 서비스 (Indoor Path Processing Service)")
-    print("=" * 60)
-    print(f"  Upload Directory: {UPLOAD_DIR}")
-    print(f"  Output Directory: {OUTPUT_DIR}")
-    print("-" * 60)
-    print("  Swagger UI: http://localhost:8000/docs")
-    print("  ReDoc:      http://localhost:8000/redoc")
-    print("=" * 60)
-
+    print("Indoor Path Processing Service")
+    print(f"  Swagger UI: http://localhost:8000/docs")
     uvicorn.run(app, host="0.0.0.0", port=8000)

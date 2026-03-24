@@ -80,10 +80,6 @@ public class VerticalPassage extends BaseEntity {
         segment.setVerticalPassage(this);
     }
 
-    public void clearSegments() {
-        segments.clear();
-    }
-
     public Point3D getEntryPoint() {
         if (entryX == null || entryY == null || entryZ == null) {
             return null;

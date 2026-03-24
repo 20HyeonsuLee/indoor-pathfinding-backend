@@ -1,21 +1,16 @@
-from .extraction import extract_trajectory_from_db
-from .deduplication import deduplicate_path
-from .smoothing import smooth_path
+from .extraction import extract_trajectory_from_db, get_trajectory_stats
 from .vertical_detector import (
-    detect_vertical_passages,
-    separate_floors,
     detect_stairs_first,
+    separate_floors,
     assign_floors_to_stairs
 )
-from .visualization import generate_preview_images
+from .ply_extraction import extract_visualization_ply
 
 __all__ = [
     'extract_trajectory_from_db',
-    'deduplicate_path',
-    'smooth_path',
-    'detect_vertical_passages',
-    'separate_floors',
+    'get_trajectory_stats',
     'detect_stairs_first',
+    'separate_floors',
     'assign_floors_to_stairs',
-    'generate_preview_images'
+    'extract_visualization_ply',
 ]

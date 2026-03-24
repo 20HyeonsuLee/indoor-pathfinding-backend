@@ -4,7 +4,6 @@ import com.koreatech.indoor_pathfinding.modules.building.domain.repository.Build
 import com.koreatech.indoor_pathfinding.modules.floor.application.dto.response.FloorPathResponse;
 import com.koreatech.indoor_pathfinding.modules.floor.application.dto.response.FloorResponse;
 import com.koreatech.indoor_pathfinding.modules.floor.domain.model.Floor;
-import com.koreatech.indoor_pathfinding.modules.floor.domain.model.FloorPath;
 import com.koreatech.indoor_pathfinding.modules.floor.domain.repository.FloorPathRepository;
 import com.koreatech.indoor_pathfinding.modules.floor.domain.repository.FloorRepository;
 import com.koreatech.indoor_pathfinding.shared.exception.BusinessException;
@@ -14,7 +13,6 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
-import java.util.Optional;
 import java.util.UUID;
 
 @Service
@@ -43,22 +41,9 @@ public class FloorReader {
         return FloorResponse.from(floor);
     }
 
-    public Floor findEntityById(UUID floorId) {
-        return floorRepository.findById(floorId)
-            .orElseThrow(() -> new BusinessException(ErrorCode.FLOOR_NOT_FOUND));
-    }
-
-    public Optional<Floor> findByBuildingIdAndLevel(UUID buildingId, int level) {
-        return floorRepository.findByBuildingIdAndLevel(buildingId, level);
-    }
-
     public FloorPathResponse findPathByFloorId(UUID floorId) {
         return floorPathRepository.findByFloorIdWithSegments(floorId)
             .map(FloorPathResponse::from)
-            .orElse(new FloorPathResponse(
-                floorId, 0.0,
-                new FloorPathResponse.BoundsResponse(0.0, 0.0, 0.0, 0.0),
-                List.of()
-            ));
+            .orElseThrow(() -> new BusinessException(ErrorCode.PATH_NOT_FOUND));
     }
 }

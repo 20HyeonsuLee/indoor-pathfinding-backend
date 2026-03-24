@@ -12,10 +12,6 @@ import java.util.UUID;
 @Repository
 public interface FloorPathRepository extends JpaRepository<FloorPath, UUID> {
 
-    Optional<FloorPath> findByFloorId(UUID floorId);
-
     @Query("SELECT fp FROM FloorPath fp LEFT JOIN FETCH fp.segments WHERE fp.floor.id = :floorId")
     Optional<FloorPath> findByFloorIdWithSegments(@Param("floorId") UUID floorId);
-
-    void deleteByFloorId(UUID floorId);
 }

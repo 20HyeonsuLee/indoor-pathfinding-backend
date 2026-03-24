@@ -60,8 +60,4 @@ public class FloorPath extends BaseEntity {
         segments.add(segment);
         segment.setFloorPath(this);
     }
-
-    public void clearSegments() {
-        segments.clear();
-    }
 }

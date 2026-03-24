@@ -295,22 +295,3 @@ def get_trajectory_stats(positions: np.ndarray) -> dict:
     }
 
 
-def get_pose_rotation(matrix: np.ndarray) -> Optional[np.ndarray]:
-    """
-    변환 행렬에서 회전 행렬(3x3)을 추출합니다.
-
-    [용도]
-    - 카메라가 바라보는 방향 계산
-    - 이동 방향 추정
-
-    Args:
-        matrix: 3x4 변환 행렬
-
-    Returns:
-        3x3 회전 행렬, 실패 시 None
-    """
-    if matrix is None:
-        return None
-
-    # 처음 3열이 회전 행렬
-    return matrix[:, :3]

@@ -38,10 +38,6 @@ public class ScanSessionReader {
         return ScanSessionResponse.from(session);
     }
 
-    public List<ScanSession> findEntitiesByBuildingId(UUID buildingId) {
-        return scanSessionRepository.findByBuildingId(buildingId);
-    }
-
     public ScanSession findEntityById(UUID sessionId) {
         return scanSessionRepository.findById(sessionId)
             .orElseThrow(() -> new BusinessException(ErrorCode.SCAN_SESSION_NOT_FOUND));
