@@ -10,6 +10,7 @@ import com.koreatech.indoor_pathfinding.modules.pathfinding.application.query.Po
 import com.koreatech.indoor_pathfinding.modules.pathfinding.domain.model.NodeType;
 import com.koreatech.indoor_pathfinding.modules.pathfinding.domain.model.PathNode;
 import com.koreatech.indoor_pathfinding.modules.pathfinding.domain.model.PathPreference;
+import com.koreatech.indoor_pathfinding.modules.pathfinding.domain.repository.PathEdgeRepository;
 import com.koreatech.indoor_pathfinding.modules.pathfinding.domain.repository.PathNodeRepository;
 import com.koreatech.indoor_pathfinding.shared.exception.BusinessException;
 import org.junit.jupiter.api.BeforeEach;
@@ -25,8 +26,11 @@ import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
+import java.util.Collections;
+
 import static org.assertj.core.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -38,6 +42,8 @@ class PathfindingServiceTest {
     private FloorRepository floorRepository;
     @Mock
     private BuildingRepository buildingRepository;
+    @Mock
+    private PathEdgeRepository pathEdgeRepository;
     @Mock
     private PoiReader poiReader;
     @Mock
@@ -58,6 +64,10 @@ class PathfindingServiceTest {
 
         floor1 = Floor.builder().building(building).name("1층").level(1).build();
         ReflectionTestUtils.setField(floor1, "id", UUID.randomUUID());
+
+        // 엣지 투영 → 엣지 없으면 findNearestNodeOnFloor 폴백
+        lenient().when(pathEdgeRepository.findByFloorIdWithNodes(any()))
+            .thenReturn(Collections.emptyList());
     }
 
     private PathNode createNode(Floor floor, double x, double y, double z, String poiName) {
