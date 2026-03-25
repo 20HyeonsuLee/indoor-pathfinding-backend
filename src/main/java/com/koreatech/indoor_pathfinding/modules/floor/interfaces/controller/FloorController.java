@@ -85,8 +85,8 @@ public class FloorController implements FloorApi {
 
         String cacheKey = floor.getPlyFileId();
         if (cacheKey == null) {
-            throw new BusinessException(ErrorCode.EXTERNAL_SERVICE_ERROR,
-                "이 층의 포인트클라우드가 아직 생성되지 않았습니다.");
+            throw new BusinessException(ErrorCode.PATH_NOT_FOUND,
+                "이 층의 포인트클라우드가 아직 생성되지 않았습니다. 스캔 업로드 후 병합을 먼저 실행하세요.");
         }
 
         byte[] plyData = pathProcessingClient.getPointcloudPly(cacheKey);
