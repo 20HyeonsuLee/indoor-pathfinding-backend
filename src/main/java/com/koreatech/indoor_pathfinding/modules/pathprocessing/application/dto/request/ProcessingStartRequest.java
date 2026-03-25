@@ -5,6 +5,6 @@ import jakarta.validation.constraints.NotNull;
 import java.util.UUID;
 
 public record ProcessingStartRequest(
-    @NotNull(message = "Session ID is required")
-    UUID sessionId
+    @NotNull(message = "Floor ID is required")
+    UUID floorId
 ) {}

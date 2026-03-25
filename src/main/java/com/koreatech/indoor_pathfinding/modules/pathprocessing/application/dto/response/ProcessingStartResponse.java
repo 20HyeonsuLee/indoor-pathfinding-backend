@@ -4,5 +4,5 @@ import java.util.UUID;
 
 public record ProcessingStartResponse(
     String jobId,
-    UUID sessionId
+    UUID floorId
 ) {}

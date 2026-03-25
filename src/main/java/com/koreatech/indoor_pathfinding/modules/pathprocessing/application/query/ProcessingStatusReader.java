@@ -18,12 +18,12 @@ public class ProcessingStatusReader {
 
     private final PathProcessingClient pathProcessingClient;
 
-    public ProcessingStatusResponse getStatus(UUID buildingId, UUID sessionId) {
-        String jobId = ProcessingStarter.getJobIdForSession(sessionId);
+    public ProcessingStatusResponse getStatusByFloor(final UUID floorId) {
+        final String jobId = ProcessingStarter.getJobIdForFloor(floorId);
 
         if (jobId == null) {
-            throw new BusinessException(ErrorCode.SCAN_SESSION_NOT_FOUND,
-                "No processing job found for session");
+            throw new BusinessException(ErrorCode.MERGED_SCAN_NOT_FOUND,
+                "No processing job found for floor");
         }
 
         return pathProcessingClient.getJobStatus(jobId);

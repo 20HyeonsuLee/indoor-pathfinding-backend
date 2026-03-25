@@ -1,19 +1,16 @@
 package com.koreatech.indoor_pathfinding.modules.scan.interfaces.controller;
 
-import com.koreatech.indoor_pathfinding.modules.pathprocessing.infrastructure.external.PathProcessingClient;
 import com.koreatech.indoor_pathfinding.modules.scan.interfaces.ScanApi;
-import com.koreatech.indoor_pathfinding.modules.scan.application.command.ScanFileUploader;
-import com.koreatech.indoor_pathfinding.modules.scan.application.command.ScanStatusUpdater;
-import com.koreatech.indoor_pathfinding.modules.scan.application.dto.response.ScanSessionResponse;
-import com.koreatech.indoor_pathfinding.modules.scan.application.query.ScanSessionReader;
-import com.koreatech.indoor_pathfinding.modules.scan.domain.model.ScanSession;
-import com.koreatech.indoor_pathfinding.shared.exception.BusinessException;
-import com.koreatech.indoor_pathfinding.shared.exception.ErrorCode;
+import com.koreatech.indoor_pathfinding.modules.scan.application.command.ChunkDeleter;
+import com.koreatech.indoor_pathfinding.modules.scan.application.command.ChunkMerger;
+import com.koreatech.indoor_pathfinding.modules.scan.application.command.ChunkUploader;
+import com.koreatech.indoor_pathfinding.modules.scan.application.dto.response.MergedScanResponse;
+import com.koreatech.indoor_pathfinding.modules.scan.application.dto.response.ScanChunkResponse;
+import com.koreatech.indoor_pathfinding.modules.scan.application.query.MergedScanReader;
+import com.koreatech.indoor_pathfinding.modules.scan.application.query.ScanChunkReader;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
-import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
@@ -23,78 +20,47 @@ import java.util.UUID;
 
 @Slf4j
 @RestController
-@RequestMapping("/api/v1/buildings/{buildingId}/scans")
+@RequestMapping("/api/v1/floors/{floorId}/scans")
 @RequiredArgsConstructor
 public class ScanController implements ScanApi {
 
-    private final ScanFileUploader scanFileUploader;
-    private final ScanSessionReader scanSessionReader;
-    private final ScanStatusUpdater scanStatusUpdater;
-    private final PathProcessingClient pathProcessingClient;
-    private final com.koreatech.indoor_pathfinding.modules.pathprocessing.application.command.ProcessingStarter processingStarter;
+    private final ChunkUploader chunkUploader;
+    private final ChunkDeleter chunkDeleter;
+    private final ChunkMerger chunkMerger;
+    private final ScanChunkReader scanChunkReader;
+    private final MergedScanReader mergedScanReader;
 
-    @PostMapping
-    public ResponseEntity<ScanSessionResponse> uploadScanFile(
-            @PathVariable UUID buildingId,
-            @RequestParam("file") MultipartFile file) {
-        ScanSessionResponse response = scanFileUploader.upload(buildingId, file);
+    @PostMapping("/chunks")
+    public ResponseEntity<ScanChunkResponse> uploadChunk(
+            @PathVariable final UUID floorId,
+            @RequestParam("file") final MultipartFile file) {
+        final ScanChunkResponse response = chunkUploader.upload(floorId, file);
         return ResponseEntity.status(HttpStatus.CREATED).body(response);
     }
 
-    @GetMapping
-    public ResponseEntity<List<ScanSessionResponse>> getScanSessions(@PathVariable UUID buildingId) {
-        List<ScanSessionResponse> sessions = scanSessionReader.findByBuildingId(buildingId);
-        return ResponseEntity.ok(sessions);
+    @GetMapping("/chunks")
+    public ResponseEntity<List<ScanChunkResponse>> getChunks(@PathVariable final UUID floorId) {
+        final List<ScanChunkResponse> chunks = scanChunkReader.findByFloorId(floorId);
+        return ResponseEntity.ok(chunks);
     }
 
-    @GetMapping("/{sessionId}")
-    public ResponseEntity<ScanSessionResponse> getScanSession(
-            @PathVariable UUID buildingId,
-            @PathVariable UUID sessionId) {
-        ScanSessionResponse response = scanSessionReader.findById(sessionId);
+    @DeleteMapping("/chunks/{chunkId}")
+    public ResponseEntity<Void> deleteChunk(
+            @PathVariable final UUID floorId,
+            @PathVariable final UUID chunkId) {
+        chunkDeleter.delete(chunkId);
+        return ResponseEntity.noContent().build();
+    }
+
+    @PostMapping("/merge")
+    public ResponseEntity<MergedScanResponse> merge(@PathVariable final UUID floorId) {
+        final MergedScanResponse response = chunkMerger.merge(floorId);
         return ResponseEntity.ok(response);
     }
 
-    @GetMapping("/{sessionId}/pointcloud")
-    public ResponseEntity<byte[]> getPointcloudPly(
-            @PathVariable UUID buildingId,
-            @PathVariable UUID sessionId) {
-        ScanSession session = scanSessionReader.findEntityById(sessionId);
-
-        String cacheKey = session.getPlyFileId();
-
-        // PLY 다운로드 시도, 실패하면 재추출
-        byte[] plyData = null;
-        if (cacheKey != null) {
-            try {
-                plyData = pathProcessingClient.getPointcloudPly(cacheKey);
-            } catch (Exception e) {
-                log.warn("Cached PLY not found ({}), re-extracting...", cacheKey);
-                cacheKey = null;
-            }
-        }
-
-        if (plyData == null) {
-            log.info("Extracting PLY on demand for session {}", sessionId);
-
-            // Python에 업로드된 파일 ID로 PLY 추출
-            String pythonFileId = com.koreatech.indoor_pathfinding.modules.pathprocessing.application.command
-                .ProcessingStarter.getPythonFileIdForSession(sessionId);
-
-            if (pythonFileId == null) {
-                pythonFileId = pathProcessingClient.uploadFile(
-                    java.nio.file.Paths.get(session.getFilePath()));
-            }
-
-            cacheKey = pathProcessingClient.extractPointcloudPly(pythonFileId);
-            scanStatusUpdater.updatePlyFileId(sessionId, cacheKey);
-            plyData = pathProcessingClient.getPointcloudPly(cacheKey);
-        }
-
-        HttpHeaders headers = new HttpHeaders();
-        headers.setContentType(MediaType.APPLICATION_OCTET_STREAM);
-        headers.setContentDispositionFormData("attachment", sessionId + ".ply");
-
-        return new ResponseEntity<>(plyData, headers, HttpStatus.OK);
+    @GetMapping("/merge/status")
+    public ResponseEntity<MergedScanResponse> getMergeStatus(@PathVariable final UUID floorId) {
+        final MergedScanResponse response = mergedScanReader.findByFloorId(floorId);
+        return ResponseEntity.ok(response);
     }
 }

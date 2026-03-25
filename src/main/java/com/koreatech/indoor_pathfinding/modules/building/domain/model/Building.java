@@ -2,15 +2,12 @@ package com.koreatech.indoor_pathfinding.modules.building.domain.model;
 
 import com.koreatech.indoor_pathfinding.modules.floor.domain.model.Floor;
 import com.koreatech.indoor_pathfinding.modules.passage.domain.model.VerticalPassage;
-import com.koreatech.indoor_pathfinding.modules.scan.domain.model.ScanSession;
 import com.koreatech.indoor_pathfinding.shared.domain.BaseEntity;
 import jakarta.persistence.*;
 import lombok.*;
 import org.locationtech.jts.geom.Point;
 
-import java.util.ArrayList;
 import java.util.HashSet;
-import java.util.List;
 import java.util.Set;
 
 @Entity
@@ -44,10 +41,6 @@ public class Building extends BaseEntity {
     @Builder.Default
     private Set<VerticalPassage> verticalPassages = new HashSet<>();
 
-    @OneToMany(mappedBy = "building", cascade = CascadeType.ALL, orphanRemoval = true)
-    @Builder.Default
-    private List<ScanSession> scanSessions = new ArrayList<>();
-
     public void updateStatus(BuildingStatus status) {
         this.status = status;
     }
@@ -71,8 +64,4 @@ public class Building extends BaseEntity {
         passage.setBuilding(this);
     }
 
-    public void addScanSession(ScanSession scanSession) {
-        scanSessions.add(scanSession);
-        scanSession.setBuilding(this);
-    }
 }

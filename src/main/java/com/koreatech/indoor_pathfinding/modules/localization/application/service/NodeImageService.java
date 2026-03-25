@@ -1,10 +1,12 @@
 package com.koreatech.indoor_pathfinding.modules.localization.application.service;
 
+import com.koreatech.indoor_pathfinding.modules.floor.domain.model.Floor;
+import com.koreatech.indoor_pathfinding.modules.floor.domain.repository.FloorRepository;
 import com.koreatech.indoor_pathfinding.modules.localization.application.dto.response.NodeImageResponse;
 import com.koreatech.indoor_pathfinding.modules.localization.infrastructure.persistence.RtabMapImageExtractor;
 import com.koreatech.indoor_pathfinding.modules.localization.infrastructure.persistence.RtabMapImageExtractor.NearbyNodeImage;
-import com.koreatech.indoor_pathfinding.modules.scan.domain.model.ScanSession;
-import com.koreatech.indoor_pathfinding.modules.scan.domain.repository.ScanSessionRepository;
+import com.koreatech.indoor_pathfinding.modules.scan.domain.model.MergedScan;
+import com.koreatech.indoor_pathfinding.modules.scan.domain.repository.MergedScanRepository;
 import com.koreatech.indoor_pathfinding.shared.exception.BusinessException;
 import com.koreatech.indoor_pathfinding.shared.exception.ErrorCode;
 import lombok.extern.slf4j.Slf4j;
@@ -24,16 +26,19 @@ public class NodeImageService {
 
     private static final int DEFAULT_IMAGE_COUNT = 3;
 
-    private final ScanSessionRepository scanSessionRepository;
+    private final FloorRepository floorRepository;
+    private final MergedScanRepository mergedScanRepository;
     private final RtabMapImageExtractor imageExtractor;
     private final String imagesPath;
 
     public NodeImageService(
-            final ScanSessionRepository scanSessionRepository,
+            final FloorRepository floorRepository,
+            final MergedScanRepository mergedScanRepository,
             final RtabMapImageExtractor imageExtractor,
             @Value("${storage.images-path:./storage/images}") final String imagesPath
     ) {
-        this.scanSessionRepository = scanSessionRepository;
+        this.floorRepository = floorRepository;
+        this.mergedScanRepository = mergedScanRepository;
         this.imageExtractor = imageExtractor;
         this.imagesPath = imagesPath;
     }
@@ -44,23 +49,30 @@ public class NodeImageService {
             final double y,
             final double z
     ) {
-        final ScanSession session = findLatestSession(buildingId);
-        final Path dbPath = Paths.get(session.getFilePath());
+        // 건물의 모든 층에서 MergedScan이 있는 것을 찾아 매칭
+        final List<Floor> floors = floorRepository.findByBuildingIdOrderByLevelAsc(buildingId);
 
-        log.info("Extracting nearby images from {} for position ({}, {}, {})", dbPath, x, y, z);
+        for (final Floor floor : floors) {
+            final var mergedScanOpt = mergedScanRepository.findByFloorId(floor.getId());
+            if (mergedScanOpt.isEmpty()) continue;
 
-        final List<NearbyNodeImage> images = imageExtractor.extractNearbyImages(
-            dbPath, x, y, z, DEFAULT_IMAGE_COUNT
-        );
+            final MergedScan mergedScan = mergedScanOpt.get();
+            if (mergedScan.getFilePath() == null) continue;
 
-        if (images.isEmpty()) {
-            throw new BusinessException(ErrorCode.ENTITY_NOT_FOUND,
-                "No images found near the specified position");
+            final Path dbPath = Paths.get(mergedScan.getFilePath());
+            final List<NearbyNodeImage> images = imageExtractor.extractNearbyImages(
+                dbPath, x, y, z, DEFAULT_IMAGE_COUNT
+            );
+
+            if (!images.isEmpty()) {
+                return images.stream()
+                    .map(image -> saveAndCreateResponse(buildingId, image))
+                    .toList();
+            }
         }
 
-        return images.stream()
-            .map(image -> saveAndCreateResponse(buildingId, image))
-            .toList();
+        throw new BusinessException(ErrorCode.ENTITY_NOT_FOUND,
+            "No images found near the specified position");
     }
 
     private NodeImageResponse saveAndCreateResponse(final UUID buildingId, final NearbyNodeImage image) {
@@ -82,11 +94,5 @@ public class NodeImageService {
         }
 
         return "/images/" + buildingId + "/" + fileName;
-    }
-
-    private ScanSession findLatestSession(final UUID buildingId) {
-        return scanSessionRepository.findFirstByBuildingIdOrderByCreatedAtDesc(buildingId)
-            .orElseThrow(() -> new BusinessException(ErrorCode.SCAN_SESSION_NOT_FOUND,
-                "No scan session found for building: " + buildingId));
     }
 }

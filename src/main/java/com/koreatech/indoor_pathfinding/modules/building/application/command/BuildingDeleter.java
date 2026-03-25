@@ -6,7 +6,7 @@ import com.koreatech.indoor_pathfinding.modules.floor.domain.model.Floor;
 import com.koreatech.indoor_pathfinding.modules.passage.domain.repository.VerticalPassageRepository;
 import com.koreatech.indoor_pathfinding.modules.pathfinding.domain.repository.PathEdgeRepository;
 import com.koreatech.indoor_pathfinding.modules.pathfinding.domain.repository.PathNodeRepository;
-import com.koreatech.indoor_pathfinding.modules.scan.domain.model.ScanSession;
+import com.koreatech.indoor_pathfinding.modules.scan.domain.model.ScanChunk;
 import com.koreatech.indoor_pathfinding.shared.exception.BusinessException;
 import com.koreatech.indoor_pathfinding.shared.exception.ErrorCode;
 import lombok.RequiredArgsConstructor;
@@ -37,19 +37,12 @@ public class BuildingDeleter {
 
         log.info("Deleting building '{}' ({})", building.getName(), id);
 
-        // 1. 엣지 삭제 (PathEdge → PathNode FK)
         pathEdgeRepository.deleteByBuildingId(id);
-
-        // 2. 노드 삭제 (PathNode → Floor FK)
         pathNodeRepository.deleteByBuildingId(id);
-
-        // 3. 수직통로 삭제 (VerticalPassage → Floor FK)
         verticalPassageRepository.deleteByBuildingId(id);
 
-        // 4. 업로드된 파일 삭제 (.db 등)
         deleteFiles(building);
 
-        // 5. 건물 삭제 (cascade로 Floor, ScanSession, FloorPath, PathSegment 삭제)
         buildingRepository.delete(building);
 
         log.info("Building '{}' and all related data deleted", building.getName());
@@ -66,12 +59,14 @@ public class BuildingDeleter {
     }
 
     private void deleteFiles(Building building) {
-        // 스캔 파일 (.db) 삭제
-        for (ScanSession scan : building.getScanSessions()) {
-            deleteFile(scan.getFilePath(), "scan db");
+        for (Floor floor : building.getFloors()) {
+            for (ScanChunk chunk : floor.getScanChunks()) {
+                deleteFile(chunk.getFilePath(), "chunk db");
+            }
+            if (floor.getMergedScan() != null && floor.getMergedScan().getFilePath() != null) {
+                deleteFile(floor.getMergedScan().getFilePath(), "merged db");
+            }
         }
-
-        // 층별 PLY 캐시는 Python 서비스 관리 (공유 볼륨) — 자동 정리 또는 TTL로 관리
         log.debug("File cleanup completed for building {}", building.getId());
     }
 

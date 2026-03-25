@@ -7,16 +7,11 @@ import com.koreatech.indoor_pathfinding.modules.floor.domain.model.Floor;
 import com.koreatech.indoor_pathfinding.modules.floor.domain.model.FloorPath;
 import com.koreatech.indoor_pathfinding.modules.floor.domain.repository.FloorPathRepository;
 import com.koreatech.indoor_pathfinding.modules.floor.domain.repository.FloorRepository;
-import com.koreatech.indoor_pathfinding.modules.passage.domain.model.PassageType;
-import com.koreatech.indoor_pathfinding.modules.passage.domain.model.VerticalPassage;
-import com.koreatech.indoor_pathfinding.modules.passage.domain.repository.VerticalPassageRepository;
-import com.koreatech.indoor_pathfinding.modules.pathprocessing.application.dto.response.ProcessingStatusResponse;
 import com.koreatech.indoor_pathfinding.modules.pathprocessing.domain.model.PathSegment;
 import com.koreatech.indoor_pathfinding.modules.pathprocessing.domain.model.Point3D;
 import com.koreatech.indoor_pathfinding.modules.pathprocessing.infrastructure.external.PathProcessingClient;
-import com.koreatech.indoor_pathfinding.modules.scan.application.command.ScanResultRecorder;
-import com.koreatech.indoor_pathfinding.modules.scan.application.query.ScanSessionReader;
-import com.koreatech.indoor_pathfinding.modules.scan.domain.model.ScanSession;
+import com.koreatech.indoor_pathfinding.modules.scan.domain.model.MergedScan;
+import com.koreatech.indoor_pathfinding.modules.scan.domain.repository.MergedScanRepository;
 import com.koreatech.indoor_pathfinding.shared.exception.BusinessException;
 import com.koreatech.indoor_pathfinding.shared.exception.ErrorCode;
 import lombok.RequiredArgsConstructor;
@@ -35,142 +30,82 @@ import java.util.UUID;
 public class ProcessingResultApplier {
 
     private final PathProcessingClient pathProcessingClient;
-    private final ScanSessionReader scanSessionReader;
-    private final ScanResultRecorder scanResultRecorder;
     private final BuildingRepository buildingRepository;
     private final FloorRepository floorRepository;
     private final FloorPathRepository floorPathRepository;
-    private final VerticalPassageRepository verticalPassageRepository;
-    public void apply(UUID sessionId) {
-        log.info("Applying processing result for session: {}", sessionId);
+    private final MergedScanRepository mergedScanRepository;
 
-        String jobId = ProcessingStarter.getJobIdForSession(sessionId);
-        if (jobId == null) {
-            throw new BusinessException(ErrorCode.SCAN_SESSION_NOT_FOUND,
-                "No processing job found for session");
+    public void applyToFloor(final UUID floorId, final String jobId) {
+        log.info("Applying processing result for floor: {}", floorId);
+
+        final Map<String, Object> result = pathProcessingClient.getJobResult(jobId);
+
+        final Floor floor = floorRepository.findById(floorId)
+            .orElseThrow(() -> new BusinessException(ErrorCode.FLOOR_NOT_FOUND));
+
+        // 기존 FloorPath 삭제
+        if (floor.getFloorPath() != null) {
+            floorPathRepository.delete(floor.getFloorPath());
+            floor.updateFloorPath(null);
         }
 
-        // Get job status
-        ProcessingStatusResponse status = pathProcessingClient.getJobStatus(jobId);
+        // 층별 처리이므로 floor_paths의 첫 번째 결과 적용
+        final List<Map<String, Object>> floorPaths =
+            (List<Map<String, Object>>) result.get("floor_paths");
 
-        if (!"COMPLETED".equals(status.status())) {
-            throw new BusinessException(ErrorCode.SCAN_PROCESSING_FAILED,
-                "Processing is not completed. Status: " + status.status());
+        if (floorPaths != null && !floorPaths.isEmpty()) {
+            applyFloorPath(floor, floorPaths.getFirst());
         }
 
-        // Get result
-        Map<String, Object> result = pathProcessingClient.getJobResult(jobId);
+        // MergedScan 업데이트
+        final int totalNodes = ((Number) result.get("total_nodes")).intValue();
+        final double totalDistance = ((Number) result.get("total_distance")).doubleValue();
+        final String previewPath = (String) result.get("preview_image_path");
 
-        ScanSession session = scanSessionReader.findEntityById(sessionId);
-        Building building = session.getBuilding();
+        final MergedScan mergedScan = mergedScanRepository.findByFloorId(floorId)
+            .orElseThrow(() -> new BusinessException(ErrorCode.MERGED_SCAN_NOT_FOUND));
 
-        // Apply floor paths
-        List<Map<String, Object>> floorPaths = (List<Map<String, Object>>) result.get("floor_paths");
-        for (Map<String, Object> floorPathData : floorPaths) {
-            applyFloorPath(building, floorPathData);
-        }
+        mergedScan.markCompleted(totalNodes, totalDistance, previewPath);
+        mergedScanRepository.save(mergedScan);
 
-        // Apply vertical passages
-        List<Map<String, Object>> passages = (List<Map<String, Object>>) result.get("vertical_passages");
-        for (Map<String, Object> passageData : passages) {
-            applyVerticalPassage(building, passageData);
-        }
-
-        // Update session with result
-        int totalNodes = ((Number) result.get("total_nodes")).intValue();
-        double totalDistance = ((Number) result.get("total_distance")).doubleValue();
-        String previewPath = (String) result.get("preview_image_path");
-        String processedPath = (String) result.get("processed_preview_path");
-
-        scanResultRecorder.recordResult(sessionId, previewPath, processedPath,
-            totalNodes, totalDistance);
-
-        // Update building status
+        // Building 상태 업데이트
+        final Building building = floor.getBuilding();
         building.updateStatus(BuildingStatus.ACTIVE);
         buildingRepository.save(building);
 
-        // 그래프 자동 생성 건너뜀 — 수동 노드 배치로 전환
-
-        log.info("Applied processing result for session: {} (floors created, graph skipped)", sessionId);
+        log.info("Applied processing result for floor: {}", floorId);
     }
 
-    /**
-     * 전체 PLY에서 층별 PLY를 추출한다.
-     * apply() 이후 트랜잭션 내에서 호출하여 세그먼트 lazy 로딩이 가능하도록 한다.
-     */
-    public void extractFloorPlys(UUID buildingId, String wholePlyKey) {
-        List<Floor> floors = floorRepository.findByBuildingIdOrderByLevelAsc(buildingId);
-        log.info("Extracting per-floor PLY for {} floors (wholePly={})", floors.size(), wholePlyKey);
+    public void updateFloorPly(final UUID floorId, final String plyKey) {
+        final Floor floor = floorRepository.findById(floorId)
+            .orElseThrow(() -> new BusinessException(ErrorCode.FLOOR_NOT_FOUND));
 
-        for (Floor floor : floors) {
-            try {
-                double minZ = Double.MAX_VALUE;
-                double maxZ = -Double.MAX_VALUE;
+        floor.updatePlyFileId(plyKey);
+        floorRepository.save(floor);
 
-                if (floor.getFloorPath() != null) {
-                    for (PathSegment seg : floor.getFloorPath().getSegments()) {
-                        minZ = Math.min(minZ, Math.min(seg.getStartPoint().getZ(), seg.getEndPoint().getZ()));
-                        maxZ = Math.max(maxZ, Math.max(seg.getStartPoint().getZ(), seg.getEndPoint().getZ()));
-                    }
-                }
+        final MergedScan mergedScan = mergedScanRepository.findByFloorId(floorId)
+            .orElseThrow(() -> new BusinessException(ErrorCode.MERGED_SCAN_NOT_FOUND));
 
-                if (minZ == Double.MAX_VALUE) {
-                    double h = floor.getHeight() != null ? floor.getHeight() : 3.0;
-                    minZ = (floor.getLevel() - 1) * h;
-                    maxZ = floor.getLevel() * h;
-                }
+        mergedScan.updatePlyFileId(plyKey);
+        mergedScanRepository.save(mergedScan);
 
-                minZ -= 0.5;
-                maxZ += 1.5;
-
-                String key = pathProcessingClient.extractFloorPly(wholePlyKey, minZ, maxZ);
-                floor.updatePlyFileId(key);
-                floorRepository.save(floor);
-
-                log.info("  Floor {} (L{}) PLY: z=[{},{}] key={}",
-                    floor.getName(), floor.getLevel(),
-                    String.format("%.1f", minZ), String.format("%.1f", maxZ), key);
-            } catch (Exception e) {
-                log.warn("  Floor {} PLY failed: {}", floor.getName(), e.getMessage());
-            }
-        }
+        log.info("Updated PLY for floor {} (key={})", floorId, plyKey);
     }
 
-    private void applyFloorPath(Building building, Map<String, Object> floorPathData) {
-        int floorLevel = ((Number) floorPathData.get("floor_level")).intValue();
-        String floorName = (String) floorPathData.get("floor_name");
-
-        // Find or create floor
-        Floor floor = floorRepository.findByBuildingIdAndLevel(building.getId(), floorLevel)
-            .orElseGet(() -> {
-                Floor newFloor = Floor.builder()
-                    .name(floorName)
-                    .level(floorLevel)
-                    .build();
-                building.addFloor(newFloor);
-                return floorRepository.save(newFloor);
-            });
-
-        // Delete existing floor path if any
-        if (floor.getFloorPath() != null) {
-            floorPathRepository.delete(floor.getFloorPath());
-        }
-
-        // Create new floor path
-        FloorPath floorPath = FloorPath.builder()
-            .build();
-
+    private void applyFloorPath(final Floor floor, final Map<String, Object> floorPathData) {
+        final FloorPath floorPath = FloorPath.builder().build();
         floor.updateFloorPath(floorPath);
 
-        // Add segments
-        List<Map<String, Object>> segments = (List<Map<String, Object>>) floorPathData.get("segments");
+        final List<Map<String, Object>> segments =
+            (List<Map<String, Object>>) floorPathData.get("segments");
+
         for (Map<String, Object> segmentData : segments) {
-            PathSegment segment = createPathSegment(segmentData);
-            floorPath.addSegment(segment);
+            floorPath.addSegment(createPathSegment(segmentData));
         }
 
-        // Set bounds
-        Map<String, Object> bounds = (Map<String, Object>) floorPathData.get("bounds");
+        final Map<String, Object> bounds =
+            (Map<String, Object>) floorPathData.get("bounds");
+
         floorPath.updateBounds(
             ((Number) bounds.get("min_x")).doubleValue(),
             ((Number) bounds.get("max_x")).doubleValue(),
@@ -178,88 +113,29 @@ public class ProcessingResultApplier {
             ((Number) bounds.get("max_y")).doubleValue()
         );
 
-        floorPath.updateTotalDistance(((Number) floorPathData.get("total_distance")).doubleValue());
+        floorPath.updateTotalDistance(
+            ((Number) floorPathData.get("total_distance")).doubleValue());
 
         floorPathRepository.save(floorPath);
     }
 
-    private void applyVerticalPassage(Building building, Map<String, Object> passageData) {
-        String type = (String) passageData.get("type");
-        int fromFloorLevel = ((Number) passageData.get("from_floor_level")).intValue();
-        int toFloorLevel = ((Number) passageData.get("to_floor_level")).intValue();
-
-        // Find or create floors
-        Floor fromFloor = floorRepository.findByBuildingIdAndLevel(building.getId(), fromFloorLevel)
-            .orElseGet(() -> {
-                Floor f = Floor.builder().name(fromFloorLevel + "층").level(fromFloorLevel).build();
-                building.addFloor(f);
-                return floorRepository.save(f);
-            });
-
-        Floor toFloor = floorRepository.findByBuildingIdAndLevel(building.getId(), toFloorLevel)
-            .orElseGet(() -> {
-                Floor f = Floor.builder().name(toFloorLevel + "층").level(toFloorLevel).build();
-                building.addFloor(f);
-                return floorRepository.save(f);
-            });
-
-        // Create vertical passage
-        VerticalPassage passage = VerticalPassage.builder()
-            .type(PassageType.valueOf(type))
-            .fromFloor(fromFloor)
-            .toFloor(toFloor)
-            .build();
-
-        building.addVerticalPassage(passage);
-
-        // Add segments
-        List<Map<String, Object>> segments = (List<Map<String, Object>>) passageData.get("segments");
-        for (Map<String, Object> segmentData : segments) {
-            PathSegment segment = createPathSegment(segmentData);
-            passage.addSegment(segment);
-        }
-
-        // Set entry/exit points
-        Map<String, Object> entryPoint = (Map<String, Object>) passageData.get("entry_point");
-        Map<String, Object> exitPoint = (Map<String, Object>) passageData.get("exit_point");
-
-        passage.updateEntryPoint(
-            ((Number) entryPoint.get("x")).doubleValue(),
-            ((Number) entryPoint.get("y")).doubleValue(),
-            ((Number) entryPoint.get("z")).doubleValue()
-        );
-
-        passage.updateExitPoint(
-            ((Number) exitPoint.get("x")).doubleValue(),
-            ((Number) exitPoint.get("y")).doubleValue(),
-            ((Number) exitPoint.get("z")).doubleValue()
-        );
-
-        verticalPassageRepository.save(passage);
-    }
-
-    private PathSegment createPathSegment(Map<String, Object> data) {
-        int sequenceOrder = ((Number) data.get("sequence_order")).intValue();
-
-        Map<String, Object> startData = (Map<String, Object>) data.get("start_point");
-        Map<String, Object> endData = (Map<String, Object>) data.get("end_point");
-
-        Point3D startPoint = Point3D.builder()
-            .x(((Number) startData.get("x")).doubleValue())
-            .y(((Number) startData.get("y")).doubleValue())
-            .z(((Number) startData.get("z")).doubleValue())
-            .build();
-
-        Point3D endPoint = Point3D.builder()
-            .x(((Number) endData.get("x")).doubleValue())
-            .y(((Number) endData.get("y")).doubleValue())
-            .z(((Number) endData.get("z")).doubleValue())
-            .build();
+    private PathSegment createPathSegment(final Map<String, Object> data) {
+        final int sequenceOrder = ((Number) data.get("sequence_order")).intValue();
+        final Map<String, Object> startData = (Map<String, Object>) data.get("start_point");
+        final Map<String, Object> endData = (Map<String, Object>) data.get("end_point");
 
         return PathSegment.builder()
             .sequenceOrder(sequenceOrder)
-            .startPoint(startPoint)
-            .endPoint(endPoint)
+            .startPoint(Point3D.builder()
+                .x(((Number) startData.get("x")).doubleValue())
+                .y(((Number) startData.get("y")).doubleValue())
+                .z(((Number) startData.get("z")).doubleValue())
+                .build())
+            .endPoint(Point3D.builder()
+                .x(((Number) endData.get("x")).doubleValue())
+                .y(((Number) endData.get("y")).doubleValue())
+                .z(((Number) endData.get("z")).doubleValue())
+                .build())
             .build();
     }
 }

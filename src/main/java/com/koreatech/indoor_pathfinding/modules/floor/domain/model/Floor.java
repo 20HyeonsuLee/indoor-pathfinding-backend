@@ -1,9 +1,14 @@
 package com.koreatech.indoor_pathfinding.modules.floor.domain.model;
 
 import com.koreatech.indoor_pathfinding.modules.building.domain.model.Building;
+import com.koreatech.indoor_pathfinding.modules.scan.domain.model.MergedScan;
+import com.koreatech.indoor_pathfinding.modules.scan.domain.model.ScanChunk;
 import com.koreatech.indoor_pathfinding.shared.domain.BaseEntity;
 import jakarta.persistence.*;
 import lombok.*;
+
+import java.util.ArrayList;
+import java.util.List;
 
 @Entity
 @Table(name = "floors", uniqueConstraints = {
@@ -34,6 +39,14 @@ public class Floor extends BaseEntity {
     @OneToOne(mappedBy = "floor", cascade = CascadeType.ALL, orphanRemoval = true)
     private FloorPath floorPath;
 
+    @OneToMany(mappedBy = "floor", cascade = CascadeType.ALL, orphanRemoval = true)
+    @OrderBy("uploadOrder ASC")
+    @Builder.Default
+    private List<ScanChunk> scanChunks = new ArrayList<>();
+
+    @OneToOne(mappedBy = "floor", cascade = CascadeType.ALL, orphanRemoval = true)
+    private MergedScan mergedScan;
+
     public void updateBuilding(Building building) {
         this.building = building;
     }
@@ -52,5 +65,30 @@ public class Floor extends BaseEntity {
 
     public void updatePlyFileId(String plyFileId) {
         this.plyFileId = plyFileId;
+    }
+
+    public void addScanChunk(ScanChunk chunk) {
+        scanChunks.add(chunk);
+        chunk.setFloor(this);
+    }
+
+    public List<ScanChunk> getActiveChunks() {
+        return scanChunks.stream()
+            .filter(ScanChunk::isActive)
+            .toList();
+    }
+
+    public int nextUploadOrder() {
+        return scanChunks.stream()
+            .mapToInt(ScanChunk::getUploadOrder)
+            .max()
+            .orElse(0) + 1;
+    }
+
+    public void updateMergedScan(MergedScan mergedScan) {
+        this.mergedScan = mergedScan;
+        if (mergedScan != null) {
+            mergedScan.setFloor(this);
+        }
     }
 }

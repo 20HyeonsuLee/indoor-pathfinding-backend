@@ -19,12 +19,12 @@ public class ScanFileUploadedEventListener {
     @Async
     @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
     public void handleScanFileUploaded(final ScanFileUploadedEvent event) {
-        log.info("Scan file uploaded for building: {}, triggering VPS SLAM processing", event.buildingId());
+        log.info("Scan file uploaded for floor: {}, triggering VPS SLAM processing", event.floorId());
 
         try {
-            vpsClient.processSlam(event.buildingId().toString());
+            vpsClient.processSlam(event.floorId().toString());
         } catch (Exception exception) {
-            log.warn("VPS SLAM processing failed for building: {} - {}", event.buildingId(), exception.getMessage());
+            log.warn("VPS SLAM processing failed for floor: {} - {}", event.floorId(), exception.getMessage());
         }
     }
 }

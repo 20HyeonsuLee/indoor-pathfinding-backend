@@ -21,10 +21,16 @@ public enum ErrorCode {
     FLOOR_NOT_FOUND(HttpStatus.NOT_FOUND, "F001", "Floor not found"),
     FLOOR_ALREADY_EXISTS(HttpStatus.CONFLICT, "F002", "Floor already exists"),
 
-    // ScanSession
-    SCAN_SESSION_NOT_FOUND(HttpStatus.NOT_FOUND, "S001", "Scan session not found"),
-    SCAN_PROCESSING_FAILED(HttpStatus.INTERNAL_SERVER_ERROR, "S002", "Scan processing failed"),
-    INVALID_SCAN_FILE(HttpStatus.BAD_REQUEST, "S003", "Invalid scan file"),
+    // ScanChunk
+    SCAN_CHUNK_NOT_FOUND(HttpStatus.NOT_FOUND, "SC001", "Scan chunk not found"),
+    INVALID_SCAN_FILE(HttpStatus.BAD_REQUEST, "SC002", "Invalid scan file"),
+    NO_ACTIVE_CHUNKS(HttpStatus.BAD_REQUEST, "SC003", "No active chunks to merge"),
+
+    // MergedScan
+    MERGED_SCAN_NOT_FOUND(HttpStatus.NOT_FOUND, "MS001", "Merged scan not found"),
+    MERGE_FAILED(HttpStatus.INTERNAL_SERVER_ERROR, "MS002", "Merge processing failed"),
+    MERGED_SCAN_NOT_PROCESSABLE(HttpStatus.BAD_REQUEST, "MS003", "Merged scan is not in a processable state"),
+    SCAN_PROCESSING_FAILED(HttpStatus.INTERNAL_SERVER_ERROR, "MS004", "Scan processing failed"),
 
     // Path
     PATH_NOT_FOUND(HttpStatus.NOT_FOUND, "P001", "Path not found"),
