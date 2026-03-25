@@ -65,6 +65,9 @@ public class ScanController implements ScanApi {
     @GetMapping("/merge/status")
     public ResponseEntity<MergedScanResponse> getMergeStatus(@PathVariable final UUID floorId) {
         final MergedScanResponse response = mergedScanReader.findByFloorId(floorId);
+        if (response == null) {
+            return ResponseEntity.ok().build();
+        }
         return ResponseEntity.ok(response);
     }
 }

@@ -318,10 +318,11 @@ class ScanControllerE2ETest extends BaseE2ETest {
         }
 
         @Test
-        @DisplayName("should return 404 when no merged scan")
-        void getMergeStatus_WhenNoMerge_ReturnsNotFound() throws Exception {
+        @DisplayName("should return 200 with empty body when no merged scan")
+        void getMergeStatus_WhenNoMerge_ReturnsOkEmpty() throws Exception {
             mockMvc.perform(get("/api/v1/floors/{floorId}/scans/merge/status", testFloor.getId()))
-                    .andExpect(status().isNotFound());
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$").doesNotExist());
         }
     }
 

@@ -19,10 +19,9 @@ public class MergedScanReader {
     private final MergedScanRepository mergedScanRepository;
 
     public MergedScanResponse findByFloorId(final UUID floorId) {
-        final MergedScan mergedScan = mergedScanRepository.findByFloorId(floorId)
-            .orElseThrow(() -> new BusinessException(ErrorCode.MERGED_SCAN_NOT_FOUND));
-
-        return MergedScanResponse.from(mergedScan);
+        return mergedScanRepository.findByFloorId(floorId)
+            .map(MergedScanResponse::from)
+            .orElse(null);
     }
 
     public MergedScan findEntityByFloorId(final UUID floorId) {
