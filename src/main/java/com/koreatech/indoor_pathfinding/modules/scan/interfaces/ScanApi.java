@@ -1,5 +1,6 @@
 package com.koreatech.indoor_pathfinding.modules.scan.interfaces;
 
+import com.koreatech.indoor_pathfinding.modules.scan.application.dto.request.MergeRequest;
 import com.koreatech.indoor_pathfinding.modules.scan.application.dto.response.MergedScanResponse;
 import com.koreatech.indoor_pathfinding.modules.scan.application.dto.response.ScanChunkResponse;
 import com.koreatech.indoor_pathfinding.shared.exception.ErrorResponse;
@@ -23,19 +24,17 @@ public interface ScanApi {
     @ApiResponses({
         @ApiResponse(responseCode = "201", description = "업로드 성공"),
         @ApiResponse(responseCode = "400", description = "잘못된 파일 형식",
-            content = @Content(schema = @Schema(implementation = ErrorResponse.class))),
-        @ApiResponse(responseCode = "404", description = "층을 찾을 수 없음",
             content = @Content(schema = @Schema(implementation = ErrorResponse.class)))
     })
     ResponseEntity<ScanChunkResponse> uploadChunk(
-        @Parameter(description = "층 ID", required = true) UUID floorId,
-        @Parameter(description = "스캔 .db 파일", required = true) MultipartFile file
+        @Parameter(description = "층 ID") UUID floorId,
+        @Parameter(description = "스캔 .db 파일") MultipartFile file
     );
 
-    @Operation(summary = "청크 목록 조회", description = "층의 모든 스캔 청크 목록을 조회합니다.")
+    @Operation(summary = "청크 목록 조회")
     @ApiResponse(responseCode = "200", description = "청크 목록 조회 성공")
     ResponseEntity<List<ScanChunkResponse>> getChunks(
-        @Parameter(description = "층 ID", required = true) UUID floorId
+        @Parameter(description = "층 ID") UUID floorId
     );
 
     @Operation(summary = "청크 삭제")
@@ -45,15 +44,16 @@ public interface ScanApi {
         @Parameter(description = "청크 ID") UUID chunkId
     );
 
-    @Operation(summary = "병합 트리거", description = "현재 active 청크들을 병합합니다. 단일 청크면 병합을 스킵합니다.")
+    @Operation(summary = "병합", description = "선택한 청크 ID들을 병합합니다. 단일 청크면 스킵합니다.")
     @ApiResponse(responseCode = "200", description = "병합 시작/완료")
     ResponseEntity<MergedScanResponse> merge(
-        @Parameter(description = "층 ID", required = true) UUID floorId
+        @Parameter(description = "층 ID") UUID floorId,
+        MergeRequest request
     );
 
     @Operation(summary = "병합 상태 조회")
     @ApiResponse(responseCode = "200", description = "병합 상태 조회 성공")
     ResponseEntity<MergedScanResponse> getMergeStatus(
-        @Parameter(description = "층 ID", required = true) UUID floorId
+        @Parameter(description = "층 ID") UUID floorId
     );
 }

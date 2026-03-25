@@ -4,10 +4,12 @@ import com.koreatech.indoor_pathfinding.modules.scan.interfaces.ScanApi;
 import com.koreatech.indoor_pathfinding.modules.scan.application.command.ChunkDeleter;
 import com.koreatech.indoor_pathfinding.modules.scan.application.command.ChunkMerger;
 import com.koreatech.indoor_pathfinding.modules.scan.application.command.ChunkUploader;
+import com.koreatech.indoor_pathfinding.modules.scan.application.dto.request.MergeRequest;
 import com.koreatech.indoor_pathfinding.modules.scan.application.dto.response.MergedScanResponse;
 import com.koreatech.indoor_pathfinding.modules.scan.application.dto.response.ScanChunkResponse;
 import com.koreatech.indoor_pathfinding.modules.scan.application.query.MergedScanReader;
 import com.koreatech.indoor_pathfinding.modules.scan.application.query.ScanChunkReader;
+import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
@@ -53,8 +55,10 @@ public class ScanController implements ScanApi {
     }
 
     @PostMapping("/merge")
-    public ResponseEntity<MergedScanResponse> merge(@PathVariable final UUID floorId) {
-        final MergedScanResponse response = chunkMerger.merge(floorId);
+    public ResponseEntity<MergedScanResponse> merge(
+            @PathVariable final UUID floorId,
+            @Valid @RequestBody final MergeRequest request) {
+        final MergedScanResponse response = chunkMerger.merge(floorId, request.chunkIds());
         return ResponseEntity.ok(response);
     }
 
