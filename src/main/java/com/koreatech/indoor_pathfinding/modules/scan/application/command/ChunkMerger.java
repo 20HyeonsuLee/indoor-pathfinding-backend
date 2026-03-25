@@ -3,6 +3,7 @@ package com.koreatech.indoor_pathfinding.modules.scan.application.command;
 import com.koreatech.indoor_pathfinding.modules.floor.domain.model.Floor;
 import com.koreatech.indoor_pathfinding.modules.floor.domain.repository.FloorRepository;
 import com.koreatech.indoor_pathfinding.modules.scan.application.dto.response.MergedScanResponse;
+import com.koreatech.indoor_pathfinding.modules.scan.domain.event.MergedScanCreatedEvent;
 import com.koreatech.indoor_pathfinding.modules.scan.domain.model.MergedScan;
 import com.koreatech.indoor_pathfinding.modules.scan.domain.model.MergedScanStatus;
 import com.koreatech.indoor_pathfinding.modules.scan.domain.model.ScanChunk;
@@ -13,6 +14,7 @@ import com.koreatech.indoor_pathfinding.shared.exception.ErrorCode;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -29,7 +31,7 @@ public class ChunkMerger {
     private final FloorRepository floorRepository;
     private final ScanChunkRepository scanChunkRepository;
     private final MergedScanRepository mergedScanRepository;
-    private final ScanProcessingExecutor scanProcessingExecutor;
+    private final ApplicationEventPublisher eventPublisher;
 
     @Value("${storage.uploads-path:./storage/uploads}")
     private String uploadsPath;
@@ -83,8 +85,9 @@ public class ChunkMerger {
 
         log.info("Single chunk — merge skipped (floor={})", floor.getId());
 
-        // 트랜잭션 커밋 후 @Async로 처리 + PLY 추출
-        scanProcessingExecutor.processAndExtractPly(saved.getId(), floor.getId());
+        // 트랜잭션 커밋 후 이벤트로 비동기 처리 시작
+        eventPublisher.publishEvent(
+            MergedScanCreatedEvent.singleChunk(saved.getId(), floor.getId()));
 
         return MergedScanResponse.from(saved);
     }
@@ -107,9 +110,9 @@ public class ChunkMerger {
             .map(ScanChunk::getFilePath)
             .toList();
 
-        // 트랜잭션 커밋 후 @Async로 병합 + 처리 + PLY 추출
-        scanProcessingExecutor.mergeAndProcess(
-            saved.getId(), floor.getId(), chunkPaths, outputPath);
+        // 트랜잭션 커밋 후 이벤트로 비동기 병합 + 처리 시작
+        eventPublisher.publishEvent(
+            MergedScanCreatedEvent.multiChunk(saved.getId(), floor.getId(), chunkPaths, outputPath));
 
         log.info("Multi-chunk merge initiated (floor={}, chunks={})", floor.getId(), chunks.size());
         return MergedScanResponse.from(saved);

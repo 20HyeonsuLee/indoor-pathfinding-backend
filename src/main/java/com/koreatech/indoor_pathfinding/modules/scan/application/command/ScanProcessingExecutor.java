@@ -3,6 +3,7 @@ package com.koreatech.indoor_pathfinding.modules.scan.application.command;
 import com.koreatech.indoor_pathfinding.modules.pathprocessing.application.command.ProcessingResultApplier;
 import com.koreatech.indoor_pathfinding.modules.pathprocessing.application.dto.response.ProcessingStatusResponse;
 import com.koreatech.indoor_pathfinding.modules.pathprocessing.infrastructure.external.PathProcessingClient;
+import com.koreatech.indoor_pathfinding.modules.scan.domain.event.MergedScanCreatedEvent;
 import com.koreatech.indoor_pathfinding.modules.scan.domain.model.MergedScan;
 import com.koreatech.indoor_pathfinding.modules.scan.domain.repository.MergedScanRepository;
 import lombok.RequiredArgsConstructor;
@@ -10,6 +11,8 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.event.TransactionPhase;
+import org.springframework.transaction.event.TransactionalEventListener;
 
 import java.nio.file.Paths;
 import java.util.List;
@@ -26,10 +29,22 @@ public class ScanProcessingExecutor {
     private final MergedScanRepository mergedScanRepository;
 
     /**
-     * 병합 완료 후 자동으로 궤적 추출 + PLY 생성.
-     * 별도 스레드에서 자체 트랜잭션으로 실행된다.
+     * 트랜잭션 커밋 후 자동으로 처리 시작.
      */
     @Async
+    @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
+    public void handleMergedScanCreated(final MergedScanCreatedEvent event) {
+        log.info("MergedScanCreatedEvent received (mergedScan={}, floor={}, needsMerge={})",
+            event.mergedScanId(), event.floorId(), event.needsMerge());
+
+        if (event.needsMerge()) {
+            mergeAndProcess(event.mergedScanId(), event.floorId(),
+                event.chunkPaths(), event.outputPath());
+        } else {
+            processAndExtractPly(event.mergedScanId(), event.floorId());
+        }
+    }
+
     @Transactional
     public void processAndExtractPly(final UUID mergedScanId, final UUID floorId) {
         try {
@@ -41,24 +56,20 @@ public class ScanProcessingExecutor {
 
             log.info("Starting processing + PLY extraction (floor={}, mergedScan={})", floorId, mergedScanId);
 
-            // 1. Python에 .db 업로드 + 처리 시작
             final String fileId = pathProcessingClient.uploadFile(Paths.get(mergedScan.getFilePath()));
             final String jobId = pathProcessingClient.startProcessing(fileId);
 
             mergedScan.startProcessing();
             mergedScanRepository.save(mergedScan);
 
-            // 2. 처리 완료 대기
             if (!waitForProcessing(jobId)) {
                 mergedScan.markFailed("Processing failed or timed out");
                 mergedScanRepository.save(mergedScan);
                 return;
             }
 
-            // 3. 결과 적용 (FloorPath 갱신)
             processingResultApplier.applyToFloor(floorId, jobId);
 
-            // 4. PLY 추출 (기존 PLY 덮어쓰기)
             final String plyKey = pathProcessingClient.extractPointcloudPly(fileId);
             processingResultApplier.updateFloorPly(floorId, plyKey);
 
@@ -70,10 +81,6 @@ public class ScanProcessingExecutor {
         }
     }
 
-    /**
-     * 다중 청크 rtabmap-reprocess 병합 → 성공 시 자동으로 처리 + PLY 추출.
-     */
-    @Async
     @Transactional
     public void mergeAndProcess(final UUID mergedScanId, final UUID floorId,
                                 final List<String> chunkPaths, final String outputPath) {
