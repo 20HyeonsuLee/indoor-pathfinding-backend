@@ -1,45 +1,44 @@
 """
 실내 경로 처리 서비스 (Indoor Path Processing Service)
 
-RTAB-Map DB 파일을 처리하여 층 분리 및 PLY 추출을 수행합니다.
+RTAB-Map DB 파일을 처리하여 궤적 추출 및 PLY 변환을 수행합니다.
+층별로 DB가 업로드되므로 층 분리/수직통로 감지는 불필요합니다.
 
 [처리 파이프라인]
 1. DB에서 궤적 추출 (extraction)
-2. 수직통로 감지 & 층 분리 (vertical_detector)
-3. 층별 경로 데이터 생성
-4. PLY 추출 (ply_extraction)
+2. 경로 데이터 생성 (단일 층)
+3. PLY 추출 (ply_extraction)
 
 [API 엔드포인트]
 - POST /api/v1/upload                    : DB 파일 업로드
 - POST /api/v1/process/{file_id}         : 처리 시작 (비동기)
 - GET  /api/v1/jobs/{job_id}             : 작업 상태 조회
 - GET  /api/v1/jobs/{job_id}/result      : 처리 결과 조회
-- POST /api/v1/pointcloud/extract        : 전체 PLY 추출
-- POST /api/v1/pointcloud/extract-floor  : 층별 PLY 추출
+- POST /api/v1/pointcloud/extract        : DB → PLY 추출
 - GET  /api/v1/pointcloud/{cache_key}/ply: PLY 다운로드
+- POST /api/v1/merge                     : 여러 DB 병합 (rtabmap-reprocess)
 """
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
-from typing import Optional, Dict
+from typing import Optional, Dict, List
 import os
 import uuid
 import asyncio
-import struct
+import subprocess
 from datetime import datetime
 import numpy as np
 
 from services.extraction import extract_trajectory_from_db, get_trajectory_stats
-from services.vertical_detector import detect_stairs_first, separate_floors, assign_floors_to_stairs
 from services.ply_extraction import extract_visualization_ply
 
 
 app = FastAPI(
     title="실내 경로 처리 서비스",
-    description="RTAB-Map DB 파일에서 층 분리 및 PLY 추출을 수행하는 서비스",
-    version="2.0.0",
+    description="RTAB-Map DB 파일에서 궤적 추출 및 PLY 변환을 수행하는 서비스",
+    version="3.0.0",
 )
 
 app.add_middleware(
@@ -64,6 +63,7 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 os.makedirs(PLY_CACHE_DIR, exist_ok=True)
 
 processing_jobs: Dict[str, "ProcessingJob"] = {}
+merge_jobs: Dict[str, "MergeJob"] = {}
 
 
 # =============================================================================
@@ -86,10 +86,20 @@ class PlyExtractRequest(BaseModel):
     file_id: Optional[str] = None
 
 
-class FloorPlyRequest(BaseModel):
-    source_cache_key: str
-    min_z: float
-    max_z: float
+class MergeRequest(BaseModel):
+    chunk_file_paths: List[str]
+    output_path: str
+
+
+class MergeJob(BaseModel):
+    job_id: str
+    status: str
+    message: str
+    created_at: str
+    completed_at: Optional[str] = None
+    output_path: Optional[str] = None
+    error: Optional[str] = None
+    merge_stats: Optional[dict] = None
 
 
 # =============================================================================
@@ -126,7 +136,7 @@ async def upload_db_file(file: UploadFile = File(...)):
 
 
 # =============================================================================
-# 처리 시작
+# 처리 시작 (궤적 추출 — 층 분리 없이 단일 층)
 # =============================================================================
 
 @app.post("/api/v1/process/{file_id}")
@@ -150,7 +160,7 @@ async def start_processing(file_id: str, background_tasks: BackgroundTasks):
 
 
 # =============================================================================
-# 비동기 처리
+# 비동기 처리 (단순화: 궤적 추출 → 결과 생성)
 # =============================================================================
 
 async def process_path_async(job_id: str, file_path: str):
@@ -159,7 +169,7 @@ async def process_path_async(job_id: str, file_path: str):
         job.status = "PROCESSING"
 
         # Step 1: 궤적 추출
-        job.progress = 10
+        job.progress = 20
         job.message = "궤적 추출 중..."
 
         raw_positions, node_ids = await asyncio.to_thread(
@@ -167,41 +177,14 @@ async def process_path_async(job_id: str, file_path: str):
         )
         trajectory_stats = get_trajectory_stats(raw_positions)
 
-        job.progress = 30
+        job.progress = 60
         job.message = f"궤적 추출 완료: {len(raw_positions)}개 포인트"
 
-        # Step 2: 수직통로 감지
-        job.progress = 40
-        job.message = "계단/엘리베이터 감지 중..."
-
-        vertical_passages, stair_mask = await asyncio.to_thread(
-            detect_stairs_first, raw_positions
-        )
-
-        job.progress = 50
-        job.message = f"수직 통로 {len(vertical_passages)}개 감지"
-
-        # Step 3: 층 분리
-        job.progress = 60
-        job.message = "층 분리 중..."
-
-        floors_data = await asyncio.to_thread(
-            separate_floors, raw_positions, node_ids,
-            stair_mask=stair_mask, vertical_passages=vertical_passages
-        )
-        vertical_passages = assign_floors_to_stairs(vertical_passages, floors_data)
-
-        job.progress = 80
-        job.message = f"{len(floors_data)}개 층 분리 완료"
-
-        # Step 4: 결과 생성
+        # Step 2: 결과 생성 (단일 층 — 층 분리 없음)
         job.progress = 90
         job.message = "결과 생성 중..."
 
-        result = _build_result(
-            job_id, raw_positions, floors_data,
-            vertical_passages, trajectory_stats,
-        )
+        result = _build_single_floor_result(job_id, raw_positions, trajectory_stats)
 
         job.status = "COMPLETED"
         job.progress = 100
@@ -216,89 +199,48 @@ async def process_path_async(job_id: str, file_path: str):
         job.message = f"처리 실패: {str(e)}"
 
 
-def _build_result(
+def _build_single_floor_result(
     job_id: str,
-    raw_positions: np.ndarray,
-    floors_data: list,
-    vertical_passages: list,
+    positions: np.ndarray,
     trajectory_stats: dict,
 ) -> dict:
-    floor_paths = []
+    """단일 층 결과를 생성한다. 층 분리 없이 전체 궤적을 하나의 floor_path로."""
+
+    segments = []
     total_distance = 0.0
 
-    for floor_info in floors_data:
-        floor_level = floor_info['floor_level']
-        positions = np.array(floor_info['positions'])
+    for i in range(len(positions) - 1):
+        start = positions[i]
+        end = positions[i + 1]
+        length = float(np.linalg.norm(end - start))
+        total_distance += length
 
-        if len(positions) < 2:
-            continue
-
-        segments = []
-        floor_distance = 0.0
-
-        for i in range(len(positions) - 1):
-            start = positions[i]
-            end = positions[i + 1]
-            length = float(np.linalg.norm(end - start))
-            floor_distance += length
-
-            segments.append({
-                "sequence_order": i,
-                "start_point": {"x": float(start[0]), "y": float(start[1]), "z": float(start[2])},
-                "end_point": {"x": float(end[0]), "y": float(end[1]), "z": float(end[2])},
-                "length": length,
-            })
-
-        total_distance += floor_distance
-        floor_name = f"{floor_level}층" if floor_level > 0 else f"B{abs(floor_level)}"
-
-        floor_paths.append({
-            "floor_level": floor_level,
-            "floor_name": floor_name,
-            "segments": segments,
-            "bounds": {
-                "min_x": float(positions[:, 0].min()),
-                "max_x": float(positions[:, 0].max()),
-                "min_y": float(positions[:, 1].min()),
-                "max_y": float(positions[:, 1].max()),
-            },
-            "total_distance": floor_distance,
+        segments.append({
+            "sequence_order": i,
+            "start_point": {"x": float(start[0]), "y": float(start[1]), "z": float(start[2])},
+            "end_point": {"x": float(end[0]), "y": float(end[1]), "z": float(end[2])},
+            "length": length,
         })
 
-    passage_results = []
-    for passage in vertical_passages:
-        positions = np.array(passage['positions'])
-        segments = []
-
-        for i in range(len(positions) - 1):
-            start = positions[i]
-            end = positions[i + 1]
-            length = float(np.linalg.norm(end - start))
-
-            segments.append({
-                "sequence_order": i,
-                "start_point": {"x": float(start[0]), "y": float(start[1]), "z": float(start[2])},
-                "end_point": {"x": float(end[0]), "y": float(end[1]), "z": float(end[2])},
-                "length": length,
-            })
-
-        passage_results.append({
-            "type": passage['type'],
-            "from_floor_level": passage.get('from_floor', 0),
-            "to_floor_level": passage.get('to_floor', 0),
-            "segments": segments,
-            "entry_point": {"x": float(positions[0][0]), "y": float(positions[0][1]), "z": float(positions[0][2])},
-            "exit_point": {"x": float(positions[-1][0]), "y": float(positions[-1][1]), "z": float(positions[-1][2])},
-        })
+    floor_path = {
+        "floor_level": 1,
+        "floor_name": "1층",
+        "segments": segments,
+        "bounds": {
+            "min_x": float(positions[:, 0].min()) if len(positions) > 0 else 0,
+            "max_x": float(positions[:, 0].max()) if len(positions) > 0 else 0,
+            "min_y": float(positions[:, 1].min()) if len(positions) > 0 else 0,
+            "max_y": float(positions[:, 1].max()) if len(positions) > 0 else 0,
+        },
+        "total_distance": total_distance,
+    }
 
     return {
         "job_id": job_id,
-        "total_nodes": len(raw_positions),
+        "total_nodes": len(positions),
         "total_distance": total_distance,
-        "floor_paths": floor_paths,
-        "vertical_passages": passage_results,
-        "path_nodes": [],
-        "path_edges": [],
+        "floor_paths": [floor_path],
+        "vertical_passages": [],
         "preview_image_path": "",
         "processed_preview_path": "",
         "stats": trajectory_stats,
@@ -332,7 +274,7 @@ async def get_job_result(job_id: str):
 
 
 # =============================================================================
-# 포인트클라우드 PLY
+# 포인트클라우드 PLY (DB → PLY 직접 변환)
 # =============================================================================
 
 @app.post("/api/v1/pointcloud/extract")
@@ -389,66 +331,102 @@ async def get_pointcloud_ply(cache_key: str):
     )
 
 
-@app.post("/api/v1/pointcloud/extract-floor")
-async def extract_floor_ply(request: FloorPlyRequest):
-    import hashlib
+# =============================================================================
+# DB 병합 (rtabmap-reprocess)
+# =============================================================================
 
-    source_path = os.path.join(PLY_CACHE_DIR, f"{request.source_cache_key}.ply")
-    if not os.path.exists(source_path):
-        raise HTTPException(status_code=404, detail="원본 PLY 없음. /extract 먼저 호출 필요")
+@app.post("/api/v1/merge")
+async def merge_databases(request: MergeRequest, background_tasks: BackgroundTasks):
+    """여러 .db 파일을 rtabmap-reprocess로 병합한다."""
 
-    floor_key = hashlib.md5(
-        f"{request.source_cache_key}_{request.min_z}_{request.max_z}".encode()
-    ).hexdigest()
-    floor_ply_path = os.path.join(PLY_CACHE_DIR, f"{floor_key}.ply")
+    # 파일 존재 확인
+    for path in request.chunk_file_paths:
+        if not os.path.exists(path):
+            raise HTTPException(status_code=404, detail=f"파일 없음: {path}")
 
-    if os.path.exists(floor_ply_path):
-        return {
-            "cache_key": floor_key,
-            "status": "CACHED",
-            "size_mb": round(os.path.getsize(floor_ply_path) / 1024 / 1024, 2),
-        }
+    if len(request.chunk_file_paths) < 2:
+        raise HTTPException(status_code=400, detail="병합하려면 2개 이상의 파일이 필요합니다.")
 
-    with open(source_path, 'rb') as f:
-        n_vertices = 0
-        while True:
-            line = f.readline().decode('ascii', errors='ignore').strip()
-            if line.startswith('element vertex'):
-                n_vertices = int(line.split()[-1])
-            if line == 'end_header':
-                break
-        data = f.read()
-
-    point_size = 15
-    filtered = bytearray()
-    count = 0
-
-    for i in range(n_vertices):
-        offset = i * point_size
-        x, y, z = struct.unpack_from('<fff', data, offset)
-        if request.min_z <= z <= request.max_z:
-            filtered.extend(data[offset:offset + point_size])
-            count += 1
-
-    header = (
-        "ply\n"
-        "format binary_little_endian 1.0\n"
-        f"element vertex {count}\n"
-        "property float x\n"
-        "property float y\n"
-        "property float z\n"
-        "property uchar red\n"
-        "property uchar green\n"
-        "property uchar blue\n"
-        "end_header\n"
+    job_id = str(uuid.uuid4())
+    merge_jobs[job_id] = MergeJob(
+        job_id=job_id,
+        status="MERGING",
+        message="병합 시작",
+        created_at=datetime.now().isoformat(),
     )
 
-    with open(floor_ply_path, 'wb') as f:
-        f.write(header.encode('ascii'))
-        f.write(bytes(filtered))
+    background_tasks.add_task(
+        merge_async, job_id, request.chunk_file_paths, request.output_path
+    )
 
-    size_mb = round(os.path.getsize(floor_ply_path) / 1024 / 1024, 2)
-    return {"cache_key": floor_key, "status": "CREATED", "point_count": count, "size_mb": size_mb}
+    return {"job_id": job_id, "status": "MERGING"}
+
+
+async def merge_async(job_id: str, chunk_paths: List[str], output_path: str):
+    """rtabmap-reprocess를 호출하여 DB를 병합한다."""
+    try:
+        job = merge_jobs[job_id]
+
+        # rtabmap-reprocess: 여러 DB를 하나로 병합
+        # 사용법: rtabmap-reprocess --Mem/IncrementalMemory false output.db input1.db input2.db ...
+        cmd = [
+            'rtabmap-reprocess',
+            '--Mem/IncrementalMemory', 'false',
+            output_path,
+            *chunk_paths,
+        ]
+
+        print(f"  병합 실행: {' '.join(cmd)}")
+
+        result = await asyncio.to_thread(
+            subprocess.run, cmd,
+            capture_output=True, text=True, timeout=1800  # 30분 타임아웃
+        )
+
+        if result.returncode != 0:
+            error_msg = result.stderr[:1000] if result.stderr else "Unknown error"
+            job.status = "FAILED"
+            job.error = error_msg
+            job.message = f"병합 실패: {error_msg}"
+            print(f"  병합 실패: {error_msg}")
+            return
+
+        if not os.path.exists(output_path):
+            job.status = "FAILED"
+            job.error = "출력 파일이 생성되지 않았습니다."
+            job.message = "병합 실패: 출력 파일 없음"
+            return
+
+        file_size = os.path.getsize(output_path)
+        job.status = "COMPLETED"
+        job.message = "병합 완료"
+        job.completed_at = datetime.now().isoformat()
+        job.output_path = output_path
+        job.merge_stats = {
+            "input_count": len(chunk_paths),
+            "output_size_bytes": file_size,
+            "output_size_mb": round(file_size / (1024 * 1024), 2),
+        }
+
+        print(f"  병합 완료: {output_path} ({file_size / 1024 / 1024:.1f} MB)")
+
+    except subprocess.TimeoutExpired:
+        job = merge_jobs[job_id]
+        job.status = "FAILED"
+        job.error = "병합 시간 초과 (30분)"
+        job.message = "병합 실패: 타임아웃"
+    except Exception as e:
+        job = merge_jobs[job_id]
+        job.status = "FAILED"
+        job.error = str(e)
+        job.message = f"병합 실패: {str(e)}"
+
+
+@app.get("/api/v1/merge/{job_id}")
+async def get_merge_status(job_id: str):
+    if job_id not in merge_jobs:
+        raise HTTPException(status_code=404, detail=f"병합 작업 없음: {job_id}")
+    return merge_jobs[job_id].model_dump()
 
 
 # =============================================================================
@@ -457,6 +435,6 @@ async def extract_floor_ply(request: FloorPlyRequest):
 
 if __name__ == "__main__":
     import uvicorn
-    print("Indoor Path Processing Service")
+    print("Indoor Path Processing Service v3.0")
     print(f"  Swagger UI: http://localhost:8000/docs")
     uvicorn.run(app, host="0.0.0.0", port=8000)

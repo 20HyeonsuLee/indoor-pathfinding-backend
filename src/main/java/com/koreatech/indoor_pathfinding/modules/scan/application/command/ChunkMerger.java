@@ -2,6 +2,7 @@ package com.koreatech.indoor_pathfinding.modules.scan.application.command;
 
 import com.koreatech.indoor_pathfinding.modules.floor.domain.model.Floor;
 import com.koreatech.indoor_pathfinding.modules.floor.domain.repository.FloorRepository;
+import com.koreatech.indoor_pathfinding.modules.pathprocessing.infrastructure.external.PathProcessingClient;
 import com.koreatech.indoor_pathfinding.modules.scan.application.dto.response.MergedScanResponse;
 import com.koreatech.indoor_pathfinding.modules.scan.domain.model.MergedScan;
 import com.koreatech.indoor_pathfinding.modules.scan.domain.model.MergedScanStatus;
@@ -12,11 +13,14 @@ import com.koreatech.indoor_pathfinding.shared.exception.BusinessException;
 import com.koreatech.indoor_pathfinding.shared.exception.ErrorCode;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
 
 @Slf4j
@@ -28,6 +32,10 @@ public class ChunkMerger {
     private final FloorRepository floorRepository;
     private final ScanChunkRepository scanChunkRepository;
     private final MergedScanRepository mergedScanRepository;
+    private final PathProcessingClient pathProcessingClient;
+
+    @Value("${storage.uploads-path:./storage/uploads}")
+    private String uploadsPath;
 
     public MergedScanResponse merge(final UUID floorId, final List<UUID> chunkIds) {
         final Floor floor = floorRepository.findById(floorId)
@@ -39,7 +47,6 @@ public class ChunkMerger {
                     "Chunk not found: " + id)))
             .toList();
 
-        // 모든 청크가 해당 층에 소속되는지 검증
         for (final ScanChunk chunk : selectedChunks) {
             if (!chunk.getFloor().getId().equals(floorId)) {
                 throw new BusinessException(ErrorCode.INVALID_INPUT_VALUE,
@@ -47,7 +54,7 @@ public class ChunkMerger {
             }
         }
 
-        // 기존 MergedScan 삭제 (새로 병합)
+        // 기존 MergedScan 삭제
         mergedScanRepository.findByFloorId(floorId)
             .ifPresent(existing -> {
                 floor.updateMergedScan(null);
@@ -59,13 +66,11 @@ public class ChunkMerger {
             .map(chunk -> chunk.getId().toString())
             .collect(Collectors.joining(",", "[", "]"));
 
-        // 단일 청크인 경우 병합 스킵
         if (selectedChunks.size() == 1) {
             return createFromSingleChunk(floor, selectedChunks.getFirst(), sourceChunkIds);
         }
 
-        // 다중 청크 병합
-        return createForMerge(floor, sourceChunkIds);
+        return createForMerge(floor, selectedChunks, sourceChunkIds);
     }
 
     private MergedScanResponse createFromSingleChunk(
@@ -84,8 +89,12 @@ public class ChunkMerger {
     }
 
     private MergedScanResponse createForMerge(
-            final Floor floor, final String sourceChunkIds) {
+            final Floor floor, final List<ScanChunk> chunks, final String sourceChunkIds) {
+
+        final String outputPath = uploadsPath + "/merged_" + floor.getId() + ".db";
+
         final MergedScan mergedScan = MergedScan.builder()
+            .filePath(outputPath)
             .sourceChunkIds(sourceChunkIds)
             .status(MergedScanStatus.MERGING)
             .build();
@@ -93,9 +102,66 @@ public class ChunkMerger {
         floor.updateMergedScan(mergedScan);
         final MergedScan saved = mergedScanRepository.save(mergedScan);
 
-        // TODO: Python 서비스에 rtabmap-reprocess 호출 (비동기)
-        log.info("Multi-chunk merge initiated (floor={}, chunks={})", floor.getId(), sourceChunkIds);
+        final List<String> chunkPaths = chunks.stream()
+            .map(ScanChunk::getFilePath)
+            .toList();
 
+        // 비동기로 Python 병합 요청
+        final UUID mergedScanId = saved.getId();
+        CompletableFuture.runAsync(() ->
+            mergeInBackground(mergedScanId, chunkPaths, outputPath));
+
+        log.info("Multi-chunk merge initiated (floor={}, chunks={})", floor.getId(), chunks.size());
         return MergedScanResponse.from(saved);
+    }
+
+    private void mergeInBackground(final UUID mergedScanId, final List<String> chunkPaths,
+                                   final String outputPath) {
+        try {
+            final String mergeJobId = pathProcessingClient.mergeChunks(chunkPaths, outputPath);
+
+            // 병합 완료 대기 (최대 30분, 30초 간격)
+            for (int i = 0; i < 60; i++) {
+                Thread.sleep(30_000);
+                final Map<String, Object> status = pathProcessingClient.getMergeStatus(mergeJobId);
+                final String statusStr = (String) status.get("status");
+
+                if ("COMPLETED".equals(statusStr)) {
+                    final MergedScan mergedScan = mergedScanRepository.findById(mergedScanId).orElse(null);
+                    if (mergedScan != null) {
+                        mergedScan.markMerged(outputPath);
+                        mergedScanRepository.save(mergedScan);
+                    }
+                    log.info("Merge completed for mergedScan {}", mergedScanId);
+                    return;
+                }
+
+                if ("FAILED".equals(statusStr)) {
+                    final String error = (String) status.get("error");
+                    final MergedScan mergedScan = mergedScanRepository.findById(mergedScanId).orElse(null);
+                    if (mergedScan != null) {
+                        mergedScan.markMergeFailed(error);
+                        mergedScanRepository.save(mergedScan);
+                    }
+                    log.error("Merge failed for mergedScan {}: {}", mergedScanId, error);
+                    return;
+                }
+            }
+
+            // 타임아웃
+            final MergedScan mergedScan = mergedScanRepository.findById(mergedScanId).orElse(null);
+            if (mergedScan != null) {
+                mergedScan.markMergeFailed("Merge timeout (30 minutes)");
+                mergedScanRepository.save(mergedScan);
+            }
+
+        } catch (Exception e) {
+            log.error("Merge background task failed: {}", e.getMessage(), e);
+            final MergedScan mergedScan = mergedScanRepository.findById(mergedScanId).orElse(null);
+            if (mergedScan != null) {
+                mergedScan.markMergeFailed(e.getMessage());
+                mergedScanRepository.save(mergedScan);
+            }
+        }
     }
 }

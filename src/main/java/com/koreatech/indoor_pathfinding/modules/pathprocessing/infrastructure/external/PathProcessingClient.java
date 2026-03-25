@@ -179,27 +179,45 @@ public class PathProcessingClient {
     }
 
     /**
-     * 전체 PLY에서 Z 범위 필터링하여 층별 PLY 추출
+     * 여러 .db 파일을 rtabmap-reprocess로 병합한다.
+     * 반환값: merge job_id (상태 폴링에 사용)
      */
-    public String extractFloorPly(String sourceCacheKey, double minZ, double maxZ) {
+    public String mergeChunks(java.util.List<String> chunkFilePaths, String outputPath) {
+        log.info("Requesting merge of {} chunks", chunkFilePaths.size());
         try {
             Map<String, Object> response = webClient.post()
-                .uri("/api/v1/pointcloud/extract-floor")
+                .uri("/api/v1/merge")
                 .bodyValue(Map.of(
-                    "source_cache_key", sourceCacheKey,
-                    "min_z", minZ,
-                    "max_z", maxZ
+                    "chunk_file_paths", chunkFilePaths,
+                    "output_path", outputPath
                 ))
                 .retrieve()
                 .bodyToMono(Map.class)
                 .block();
 
-            String cacheKey = (String) response.get("cache_key");
-            log.info("Floor PLY extracted: cache_key={}, z=[{}, {}]", cacheKey, minZ, maxZ);
-            return cacheKey;
+            String jobId = (String) response.get("job_id");
+            log.info("Merge started with job_id: {}", jobId);
+            return jobId;
         } catch (WebClientResponseException e) {
-            log.warn("Floor PLY extraction failed: {}", e.getMessage());
-            throw new BusinessException(ErrorCode.EXTERNAL_SERVICE_ERROR, "Floor PLY extraction failed");
+            log.error("Merge request failed: {}", e.getMessage());
+            throw new BusinessException(ErrorCode.MERGE_FAILED,
+                "Merge request failed: " + e.getMessage());
+        }
+    }
+
+    /**
+     * 병합 작업 상태를 조회한다.
+     */
+    public Map<String, Object> getMergeStatus(String mergeJobId) {
+        try {
+            return webClient.get()
+                .uri("/api/v1/merge/{jobId}", mergeJobId)
+                .retrieve()
+                .bodyToMono(Map.class)
+                .block();
+        } catch (WebClientResponseException e) {
+            throw new BusinessException(ErrorCode.EXTERNAL_SERVICE_ERROR,
+                "Failed to get merge status: " + e.getMessage());
         }
     }
 
