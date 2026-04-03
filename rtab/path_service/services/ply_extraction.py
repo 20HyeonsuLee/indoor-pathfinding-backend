@@ -10,7 +10,7 @@ import tempfile
 import os
 import numpy as np
 
-VISUALIZATION_VOXEL_SIZE = 0.2
+VISUALIZATION_VOXEL_SIZE = 0.0
 
 
 def extract_visualization_ply(db_path, output_path, voxel_size=VISUALIZATION_VOXEL_SIZE):
@@ -25,9 +25,9 @@ def extract_visualization_ply(db_path, output_path, voxel_size=VISUALIZATION_VOX
             'rtabmap-export',
             '--cloud',
             '--voxel', str(voxel_size),
-            '--max_range', '5',
-            '--depth_confidence', '50',
-            '--decimation', '4',
+            '--max_range', '0',
+            '--depth_confidence', '0',
+            '--decimation', '1',
             '--output_dir', tmpdir,
             '--output', 'cloud',
             db_path,
