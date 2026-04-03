@@ -28,7 +28,7 @@ public class PathProcessingClient {
             .baseUrl(baseUrl)
             .codecs(configurer -> configurer
                 .defaultCodecs()
-                .maxInMemorySize(16 * 1024 * 1024))  // 16MB
+                .maxInMemorySize(256 * 1024 * 1024))  // 256MB
             .build();
     }
 
